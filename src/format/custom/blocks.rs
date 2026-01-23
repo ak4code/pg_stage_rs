@@ -189,7 +189,6 @@ impl<'a> BlockProcessor<'a> {
     }
 
     fn compress_and_write<W: Write>(&self, writer: &mut W, data: &[u8]) -> Result<()> {
-        // Python uses zlib level 6
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
         encoder
             .write_all(data)
@@ -198,21 +197,10 @@ impl<'a> BlockProcessor<'a> {
             .finish()
             .map_err(|e| PgStageError::CompressionError(format!("Zlib compression finish failed: {}", e)))?;
 
-        // Write compressed data in chunks
-        let mut offset = 0;
-        while offset < compressed.len() {
-            let end = (offset + OUTPUT_CHUNK_SIZE).min(compressed.len());
-            let chunk = &compressed[offset..end];
-
-            // CRITICAL: custom.py writes POSITIVE integers for the length of compressed chunks!
-            // DumpIO::write_int writes [sign_byte, bytes...].
-            // Passing a positive length results in sign_byte 0.
-            // Standard pg_dump usually writes negative, but custom.py writes positive.
-            self.dio.write_int(writer, chunk.len() as i32)?;
-            writer.write_all(chunk)?;
-
-            offset = end;
-        }
+        // Write as a single chunk — each chunk must be a complete zlib stream
+        // for pg_restore to decompress independently.
+        self.dio.write_int(writer, -(compressed.len() as i32))?;
+        writer.write_all(&compressed)?;
 
         Ok(())
     }

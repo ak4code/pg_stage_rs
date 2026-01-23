@@ -1,0 +1,12 @@
+# Rust specific
+/target/
+**/*.rs.bk
+**/*.rs.swp
+
+# staff
+custom.py
+*.dump
+
+# IDE's folders
+.idea
+.vscode

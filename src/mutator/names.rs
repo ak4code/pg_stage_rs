@@ -1,15 +1,14 @@
 use crate::error::{PgStageError, Result};
-use crate::mutator::locale;
 use crate::mutator::MutationContext;
 
 pub fn first_name(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     if unique {
         ctx.unique_tracker.generate_unique(|| {
-            locale::get_first_name(ctx.locale, &mut ctx.rng)
+            ctx.provider.person.first_name(None).to_string()
         })
     } else {
-        Ok(locale::get_first_name(ctx.locale, &mut ctx.rng))
+        Ok(ctx.provider.person.first_name(None).to_string())
     }
 }
 
@@ -17,21 +16,21 @@ pub fn last_name(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     if unique {
         ctx.unique_tracker.generate_unique(|| {
-            locale::get_last_name(ctx.locale, &mut ctx.rng)
+            ctx.provider.person.last_name(None)
         })
     } else {
-        Ok(locale::get_last_name(ctx.locale, &mut ctx.rng))
+        Ok(ctx.provider.person.last_name(None))
     }
 }
 
 pub fn full_name(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     let mut gen = || {
-        let last = locale::get_last_name(ctx.locale, &mut ctx.rng);
-        let first = locale::get_first_name(ctx.locale, &mut ctx.rng);
+        let last = ctx.provider.person.last_name(None);
+        let first = ctx.provider.person.first_name(None).to_string();
         match ctx.locale {
             crate::types::Locale::Ru => {
-                let patronymic = locale::get_patronymic(&mut ctx.rng);
+                let patronymic = crate::mutator::locale::get_patronymic(&mut ctx.rng);
                 format!("{} {} {}", last, first, patronymic)
             }
             _ => format!("{} {}", last, first),
@@ -53,9 +52,9 @@ pub fn middle_name(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     if unique {
         ctx.unique_tracker.generate_unique(|| {
-            locale::get_patronymic(&mut ctx.rng)
+            crate::mutator::locale::get_patronymic(&mut ctx.rng)
         })
     } else {
-        Ok(locale::get_patronymic(&mut ctx.rng))
+        Ok(crate::mutator::locale::get_patronymic(&mut ctx.rng))
     }
 }

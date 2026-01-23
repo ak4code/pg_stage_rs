@@ -19,14 +19,14 @@ pub fn uuid5_by_source_value(ctx: &mut MutationContext) -> Result<String> {
         )
     })?;
 
-    let namespace = Uuid::parse_str(&namespace_str).map_err(|e| {
+    let namespace = Uuid::parse_str(namespace_str).map_err(|e| {
         PgStageError::InvalidParameter(format!("Invalid UUID namespace '{}': {}", namespace_str, e))
     })?;
 
     // Get source value from obfuscated_values
     let source_value = ctx
         .obfuscated_values
-        .get(&source_column)
+        .get(source_column)
         .cloned()
         .unwrap_or_default();
 

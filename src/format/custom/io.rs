@@ -32,14 +32,13 @@ impl DumpIO {
         reader.read_exact(&mut sign_buf)?;
         let sign = sign_buf[0];
 
-        // Magnitude bytes (little-endian)
-        let mut buf = vec![0u8; self.int_size];
-        reader.read_exact(&mut buf)?;
+        // Magnitude bytes (little-endian) — stack buffer, max 8 bytes
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf[..self.int_size])?;
 
         let mut value: i32 = 0;
         let mut shift = 0;
-        for b in buf {
-            // Little-endian reconstruction
+        for &b in &buf[..self.int_size] {
             value |= (b as i32) << shift;
             shift += 8;
         }
@@ -63,14 +62,14 @@ impl DumpIO {
         writer.write_all(&sign_buf)?;
         let sign = sign_buf[0];
 
-        // Magnitude bytes
-        let mut buf = vec![0u8; self.int_size];
-        reader.read_exact(&mut buf)?;
-        writer.write_all(&buf)?;
+        // Magnitude bytes — stack buffer
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf[..self.int_size])?;
+        writer.write_all(&buf[..self.int_size])?;
 
         let mut value: i32 = 0;
         let mut shift = 0;
-        for b in buf {
+        for &b in &buf[..self.int_size] {
             value |= (b as i32) << shift;
             shift += 8;
         }

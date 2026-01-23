@@ -17,6 +17,11 @@ hmac = "0.12"
 sha2 = "0.10"
 thiserror = "2"
 
+# warlocks-cauldron is now a required dependency; enable only en and ru locales to reduce build size
+warlocks-cauldron = { version = "0.26.10", features = ["en", "ru"] }
+
 [profile.release]
 opt-level = 3
 lto = true
+codegen-units = 1
+strip = true

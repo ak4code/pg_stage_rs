@@ -16,6 +16,8 @@ use crate::error::{PgStageError, Result};
 use crate::types::Locale;
 use crate::unique::UniqueTracker;
 
+use warlocks_cauldron::ComplexProvider;
+
 pub struct MutationContext<'a> {
     pub kwargs: &'a HashMap<String, serde_json::Value>,
     pub current_value: String,
@@ -24,6 +26,8 @@ pub struct MutationContext<'a> {
     pub locale: Locale,
     pub secrets: &'a HashMap<String, String>,
     pub obfuscated_values: &'a HashMap<String, String>,
+    // Reusable warlocks provider for hot-path generators
+    pub provider: &'a ComplexProvider<'static>,
 }
 
 impl<'a> MutationContext<'a> {
@@ -34,8 +38,8 @@ impl<'a> MutationContext<'a> {
             .unwrap_or(false)
     }
 
-    pub fn get_str_kwarg(&self, key: &str) -> Option<String> {
-        self.kwargs.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    pub fn get_str_kwarg(&self, key: &str) -> Option<&'a str> {
+        self.kwargs.get(key).and_then(|v| v.as_str())
     }
 }
 

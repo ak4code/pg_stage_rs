@@ -18,7 +18,7 @@ pub fn date(ctx: &mut MutationContext) -> Result<String> {
         .unwrap_or(current_year as i64) as i32;
     let date_format = ctx
         .get_str_kwarg("date_format")
-        .unwrap_or_else(|| "%Y-%m-%d".to_string());
+        .unwrap_or("%Y-%m-%d");
     let unique = ctx.get_bool_kwarg("unique");
 
     let mut gen = || {
@@ -28,7 +28,7 @@ pub fn date(ctx: &mut MutationContext) -> Result<String> {
         let day = ctx.rng.gen_range(1..=max_day);
         let d = NaiveDate::from_ymd_opt(year, month, day)
             .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, month, 1).unwrap());
-        d.format(&date_format).to_string()
+        d.format(date_format).to_string()
     };
 
     if unique {

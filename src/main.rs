@@ -40,7 +40,7 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
 
-    let locale = Locale::from_str(&args.locale);
+    let locale: Locale = args.locale.parse().unwrap();
     let delimiter = args.delimiter.bytes().next().unwrap_or(b'\t');
 
     let delete_patterns: Vec<Regex> = args

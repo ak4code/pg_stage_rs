@@ -5,9 +5,9 @@ use crate::types::Condition;
 /// Check if conditions are met for a given row.
 /// Returns true if at least one condition matches.
 /// Returns true if conditions list is empty.
-pub fn check_conditions(
+pub fn check_conditions<S: AsRef<str>>(
     conditions: &[Condition],
-    values: &[&str],
+    values: &[S],
     column_indices: &std::collections::HashMap<String, usize>,
 ) -> bool {
     if conditions.is_empty() {
@@ -22,7 +22,7 @@ pub fn check_conditions(
         if col_idx >= values.len() {
             continue;
         }
-        let col_value = values[col_idx];
+        let col_value = values[col_idx].as_ref();
 
         let matched = match condition.operation.as_str() {
             "equal" => col_value == condition.value,

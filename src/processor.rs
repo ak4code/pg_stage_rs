@@ -1,14 +1,27 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use regex::Regex;
+use warlocks_cauldron::{ComplexProvider, Locale as WLocale};
 
 use crate::conditions::check_conditions;
 use crate::mutator::{dispatch_mutation, MutationContext};
 use crate::relations::RelationTracker;
 use crate::types::{Locale, MutationMap, MutationSpec, TableMutationMap, TableMutationSpec};
 use crate::unique::UniqueTracker;
+
+pub static PROVIDER_EN: LazyLock<ComplexProvider<'static>> = LazyLock::new(|| ComplexProvider::new(&WLocale::EN));
+pub static PROVIDER_RU: LazyLock<ComplexProvider<'static>> = LazyLock::new(|| ComplexProvider::new(&WLocale::RU));
+
+fn get_provider_for_locale(locale: Locale) -> &'static ComplexProvider<'static> {
+    match locale {
+        Locale::En => &PROVIDER_EN,
+        Locale::Ru => &PROVIDER_RU,
+    }
+}
 
 pub struct DataProcessor {
     pub mutation_map: MutationMap,
@@ -31,6 +44,9 @@ pub struct DataProcessor {
     relation_tracker: RelationTracker,
     secrets: HashMap<String, String>,
 
+    // warlocks provider reused across contexts
+    provider: &'static ComplexProvider<'static>,
+
     // Regex patterns
     comment_column_re: Regex,
     comment_table_re: Regex,
@@ -50,6 +66,9 @@ impl DataProcessor {
             m
         };
 
+        // Choose static provider for the requested locale
+        let provider = get_provider_for_locale(locale);
+
         Self {
             mutation_map: HashMap::new(),
             table_mutations: HashMap::new(),
@@ -66,6 +85,7 @@ impl DataProcessor {
             unique_tracker: UniqueTracker::new(),
             relation_tracker: RelationTracker::new(),
             secrets,
+            provider,
             comment_column_re: Regex::new(
                 r"COMMENT ON COLUMN ([\d\w_\.]+) IS 'anon: ([\s\S]*)';",
             )
@@ -74,7 +94,7 @@ impl DataProcessor {
                 r"COMMENT ON TABLE ([\d\w_\.]*) IS 'anon: ([\s\S]*)';",
             )
             .unwrap(),
-            copy_re: Regex::new(r"COPY ([\d\w_\.]+) \(([\w\W]+)\) FROM stdin;").unwrap(),
+            copy_re: Regex::new(r"COPY ([\d\w_\.]+) \(([#\w\W]+)\) FROM stdin;").unwrap(),
         }
     }
 
@@ -170,40 +190,59 @@ impl DataProcessor {
             Err(_) => return Some(line.to_vec()),
         };
 
-        let values: Vec<&str> = line_str.split(self.delimiter as char).collect();
+        let delimiter_char = self.delimiter as char;
+        let values: Vec<&str> = line_str.split(delimiter_char).collect();
         if values.len() != self.current_columns.len() {
             return Some(line.to_vec());
         }
 
-        let mut result_values: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+        // Use Cow to avoid allocating Strings for unmodified columns
+        let mut result_values: Vec<Cow<'_, str>> = values.iter().map(|&s| Cow::Borrowed(s)).collect();
         let mut obfuscated_values: HashMap<String, String> = HashMap::new();
 
-        for col_name in &self.sorted_columns.clone() {
-            let specs = match self.current_mutations.get(col_name) {
-                Some(s) => s.clone(),
+        // Iterate by index to avoid cloning sorted_columns
+        for col_sort_idx in 0..self.sorted_columns.len() {
+            let col_name = &self.sorted_columns[col_sort_idx];
+
+            let col_idx = match self.column_indices.get(col_name.as_str()) {
+                Some(&idx) => idx,
                 None => continue,
             };
 
-            let col_idx = match self.column_indices.get(col_name) {
-                Some(idx) => *idx,
+            let specs = match self.current_mutations.get(col_name.as_str()) {
+                Some(s) => s,
                 None => continue,
             };
 
-            let current_value = result_values[col_idx].clone();
+            let current_value = result_values[col_idx].to_string();
 
             // Try each mutation spec in order
             for spec in specs.iter() {
-                // Check conditions
-                let values_refs: Vec<&str> = result_values.iter().map(|s| s.as_str()).collect();
-                if !check_conditions(&spec.conditions, &values_refs, &self.column_indices) {
+                // Check conditions — borrow of result_values ends after this call (NLL)
+                if !check_conditions(&spec.conditions, result_values.as_slice(), &self.column_indices) {
                     continue;
                 }
 
-                // Check relations
+                // Check relations (inlined to avoid &self method call)
                 if !spec.relations.is_empty() {
-                    if let Some(new_val) = self.try_relation_lookup(spec, &result_values) {
-                        result_values[col_idx] = new_val.clone();
-                        obfuscated_values.insert(col_name.clone(), new_val);
+                    let mut relation_found = false;
+                    for relation in &spec.relations {
+                        if let Some(&from_idx) = self.column_indices.get(&relation.from_column_name) {
+                            let fk_value = result_values[from_idx].to_string();
+                            if let Some(existing) = self.relation_tracker.lookup(
+                                &relation.table_name,
+                                &relation.to_column_name,
+                                &fk_value,
+                            ) {
+                                let val = existing.clone();
+                                obfuscated_values.insert(col_name.clone(), val.clone());
+                                result_values[col_idx] = Cow::Owned(val);
+                                relation_found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if relation_found {
                         break;
                     }
                 }
@@ -217,28 +256,43 @@ impl DataProcessor {
                     locale: self.locale,
                     secrets: &self.secrets,
                     obfuscated_values: &obfuscated_values,
+                    provider: self.provider,
                 };
 
                 match dispatch_mutation(&spec.mutation_name, &mut ctx) {
                     Ok(new_val) => {
-                        // Store relation if needed
+                        // Store relation (inlined to avoid &mut self method call)
                         if !spec.relations.is_empty() {
-                            self.store_relation(spec, &result_values, &new_val);
+                            for relation in &spec.relations {
+                                if let Some(&from_idx) = self.column_indices.get(&relation.from_column_name) {
+                                    let fk_value = result_values[from_idx].to_string();
+                                    self.relation_tracker.store(
+                                        &relation.table_name,
+                                        &relation.to_column_name,
+                                        &fk_value,
+                                        &new_val,
+                                    );
+                                }
+                            }
                         }
-                        result_values[col_idx] = new_val.clone();
-                        obfuscated_values.insert(col_name.clone(), new_val);
+                        obfuscated_values.insert(col_name.clone(), new_val.clone());
+                        result_values[col_idx] = Cow::Owned(new_val);
                         break;
                     }
-                    Err(_) => {
-                        continue;
-                    }
+                    Err(_) => continue,
                 }
             }
         }
 
-        let delimiter_char = self.delimiter as char;
-        let output = result_values.join(&delimiter_char.to_string());
-        Some(output.into_bytes())
+        // Build output directly into bytes without intermediate String
+        let mut output = Vec::with_capacity(line.len());
+        for (i, val) in result_values.iter().enumerate() {
+            if i > 0 {
+                output.push(self.delimiter);
+            }
+            output.extend_from_slice(val.as_ref().as_bytes());
+        }
+        Some(output)
     }
 
     /// Reset table state (called when COPY data ends)
@@ -300,46 +354,4 @@ impl DataProcessor {
         independent
     }
 
-    fn try_relation_lookup(
-        &self,
-        spec: &MutationSpec,
-        values: &[String],
-    ) -> Option<String> {
-        for relation in &spec.relations {
-            let from_col_idx = match self.column_indices.get(&relation.from_column_name) {
-                Some(idx) => *idx,
-                None => continue,
-            };
-            let fk_value = &values[from_col_idx];
-            if let Some(existing) = self.relation_tracker.lookup(
-                &relation.table_name,
-                &relation.to_column_name,
-                fk_value,
-            ) {
-                return Some(existing.clone());
-            }
-        }
-        None
-    }
-
-    fn store_relation(
-        &mut self,
-        spec: &MutationSpec,
-        values: &[String],
-        new_val: &str,
-    ) {
-        for relation in &spec.relations {
-            let from_col_idx = match self.column_indices.get(&relation.from_column_name) {
-                Some(idx) => *idx,
-                None => continue,
-            };
-            let fk_value = &values[from_col_idx];
-            self.relation_tracker.store(
-                &relation.table_name,
-                &relation.to_column_name,
-                fk_value,
-                new_val,
-            );
-        }
-    }
 }

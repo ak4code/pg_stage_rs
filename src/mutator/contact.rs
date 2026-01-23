@@ -3,16 +3,16 @@ use rand::Rng;
 use sha2::Sha256;
 
 use crate::error::{PgStageError, Result};
-use crate::mutator::locale;
 use crate::mutator::MutationContext;
 
 pub fn email(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     let mut gen = || {
-        let first = locale::get_first_name(ctx.locale, &mut ctx.rng).to_lowercase();
-        let last = locale::get_last_name(ctx.locale, &mut ctx.rng).to_lowercase();
+        let first = ctx.provider.person.first_name(None).to_string().to_lowercase();
+        let last = ctx.provider.person.last_name(None).to_lowercase();
         let num: u32 = ctx.rng.gen_range(1..9999);
-        let domain = locale::get_email_domain(ctx.locale, &mut ctx.rng);
+        let email = warlocks_cauldron::Person::email(None, false);
+        let domain = email.split('@').nth(1).unwrap_or("example.com").to_string();
         format!("{}.{}{}@{}", first, last, num, domain)
     };
     if unique {
@@ -23,17 +23,18 @@ pub fn email(ctx: &mut MutationContext) -> Result<String> {
 }
 
 pub fn phone_number(ctx: &mut MutationContext) -> Result<String> {
-    let mask = ctx.get_str_kwarg("mask").ok_or_else(|| {
+    let mask: &str = ctx.get_str_kwarg("mask").ok_or_else(|| {
         PgStageError::MissingParameter("mask".to_string(), "phone_number".to_string())
     })?;
     let unique = ctx.get_bool_kwarg("unique");
+    let mask_bytes = mask.as_bytes();
     let mut gen = || {
-        let mut result = String::with_capacity(mask.len());
-        for ch in mask.chars() {
-            if ch == 'X' || ch == '#' {
+        let mut result = String::with_capacity(mask_bytes.len());
+        for &b in mask_bytes {
+            if b == b'X' || b == b'#' {
                 result.push(char::from(b'0' + ctx.rng.gen_range(0..10u8)));
             } else {
-                result.push(ch);
+                result.push(b as char);
             }
         }
         result
@@ -49,10 +50,10 @@ pub fn address(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     if unique {
         ctx.unique_tracker.generate_unique(|| {
-            locale::get_address(ctx.locale, &mut ctx.rng)
+            ctx.provider.address.full_address()
         })
     } else {
-        Ok(locale::get_address(ctx.locale, &mut ctx.rng))
+        Ok(ctx.provider.address.full_address())
     }
 }
 
@@ -96,14 +97,11 @@ pub fn deterministic_phone(ctx: &mut MutationContext) -> Result<String> {
     let result = mac.finalize();
     let hash_bytes = result.into_bytes();
 
-    // Extract digits from hash
-    let mut new_digits = String::with_capacity(count);
-    for byte in hash_bytes.iter() {
-        if new_digits.len() >= count {
-            break;
-        }
-        new_digits.push(char::from(b'0' + (byte % 10)));
-    }
+    // Extract digits from hash into a Vec for O(1) indexing
+    let new_digits: Vec<u8> = hash_bytes.iter()
+        .take(count)
+        .map(|byte| b'0' + (byte % 10))
+        .collect();
 
     // Replace last `count` digits in original value
     let mut result_chars: Vec<char> = current_value.chars().collect();
@@ -112,7 +110,7 @@ pub fn deterministic_phone(ctx: &mut MutationContext) -> Result<String> {
         if result_chars[i].is_ascii_digit() && replaced < count {
             let digit_idx = count - 1 - replaced;
             if digit_idx < new_digits.len() {
-                result_chars[i] = new_digits.chars().nth(digit_idx).unwrap();
+                result_chars[i] = new_digits[digit_idx] as char;
             }
             replaced += 1;
         }

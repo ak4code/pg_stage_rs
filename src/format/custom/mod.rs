@@ -66,9 +66,8 @@ impl CustomHandler {
             // Block type 0x01 = DATA
             if block_type[0] == 0x01 {
                 let dump_id = dio.read_int(&mut reader)
-                    .map_err(|e| {
+                    .inspect_err(|_| {
                         eprintln!("Failed to read dump_id after DATA block");
-                        e
                     })?;
 
                 // Check if this dump_id is in our data_entries map
@@ -134,8 +133,6 @@ impl CustomHandler {
                     entry.dump_id,
                     DataEntryInfo {
                         copy_stmt: entry.copy_stmt.clone(),
-                        _tag: entry.tag.clone(),
-                        _namespace: entry.namespace.clone(),
                     },
                 );
             }
@@ -146,6 +143,4 @@ impl CustomHandler {
 
 struct DataEntryInfo {
     copy_stmt: String,
-    _tag: String,
-    _namespace: String,
 }

@@ -1,14 +1,13 @@
 use std::io::{Read, Write};
 
-use crate::error::{Result};
+use crate::error::Result;
 
 /// Binary I/O utilities for PostgreSQL custom dump format.
 ///
-/// This implementation is kept compatible with the existing Python
-/// `custom.py` helper used in this project. That code (and therefore this
-/// one) represents integers as `1 byte sign + int_size bytes magnitude`,
-/// little-endian, which matches how the working Python version parses and
-/// writes dumps.
+/// This implementation matches the Python `custom.py` helper:
+/// - Integers: 1 byte sign (0=pos, 1=neg) + int_size bytes magnitude (little-endian).
+/// - Strings: Integer length + UTF-8 bytes.
+/// - Offsets: offset_size bytes (little-endian).
 pub struct DumpIO {
     pub int_size: usize,
     pub offset_size: usize,
@@ -40,9 +39,8 @@ impl DumpIO {
         let mut value: i32 = 0;
         let mut shift = 0;
         for b in buf {
-            if b != 0 {
-                value += (b as i32) << shift;
-            }
+            // Little-endian reconstruction
+            value |= (b as i32) << shift;
             shift += 8;
         }
 
@@ -73,9 +71,7 @@ impl DumpIO {
         let mut value: i32 = 0;
         let mut shift = 0;
         for b in buf {
-            if b != 0 {
-                value += (b as i32) << shift;
-            }
+            value |= (b as i32) << shift;
             shift += 8;
         }
 
@@ -88,27 +84,27 @@ impl DumpIO {
 
     /// Write a signed integer as `1 byte sign + int_size bytes`.
     pub fn write_int<W: Write>(&self, writer: &mut W, val: i32) -> Result<()> {
-        let mut v = val;
-        let sign: u8 = if v < 0 {
-            v = -v;
-            1
+        let (sign, v_abs) = if val < 0 {
+            (1u8, val.wrapping_neg()) // Use wrapping_neg to handle i32::MIN edge cases safely
         } else {
-            0
+            (0u8, val)
         };
 
         // Sign byte
         writer.write_all(&[sign])?;
 
         // Magnitude bytes (little-endian)
-        for i in 0..self.int_size {
-            let byte = ((v >> (i * 8)) & 0xFF) as u8;
+        let mut current = v_abs;
+        for _ in 0..self.int_size {
+            let byte = (current & 0xFF) as u8;
             writer.write_all(&[byte])?;
+            current >>= 8;
         }
 
         Ok(())
     }
 
-    /// Read a string: int length + bytes. Returns None for length 0 or -1.
+    /// Read a string: int length + bytes. Returns None for length <= 0.
     pub fn read_string<R: Read>(&self, reader: &mut R) -> Result<Option<String>> {
         let len = self.read_int(reader)?;
         if len <= 0 {
@@ -120,7 +116,7 @@ impl DumpIO {
         Ok(Some(s))
     }
 
-    /// Read a string and bypass to output.
+    /// Read a string and bypass raw bytes to output.
     pub fn read_string_bypass<R: Read, W: Write>(
         &self,
         reader: &mut R,

@@ -74,19 +74,20 @@ pub fn parse_toc<R: Read, W: Write>(
     for _ in 0..toc_count {
         let dump_id = dio.read_int_bypass(reader, writer)?;
         
-        // hadDumper (legacy, always present)
+        // hadDumper (legacy, always present, Python reads int->bool, we just bypass int)
         let _had_dumper = dio.read_int_bypass(reader, writer)?;
 
         // table_oid (first OID string)
         let _table_oid = dio.read_string_bypass(reader, writer)?;
         // oid (second OID string)
         let _oid = dio.read_string_bypass(reader, writer)?;
+
         // Tag
         let tag = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
         // Desc
         let desc = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
 
-        // Section
+        // Section (1=Pre, 2=Data, 3=Post, 4=None)
         let section_raw = dio.read_int_bypass(reader, writer)?;
         let section = Section::from_i32(section_raw);
 
@@ -98,11 +99,10 @@ pub fn parse_toc<R: Read, W: Write>(
         let copy_stmt = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
         // namespace
         let namespace = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
-
         // tablespace
         let tablespace = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
 
-        // tableam (added in format 1.14)
+        // tableam (added in format 1.14.0)
         let tableam = if header.is_version_at_least(1, 14, 0) {
             dio.read_string_bypass(reader, writer)?.unwrap_or_default()
         } else {
@@ -112,12 +112,14 @@ pub fn parse_toc<R: Read, W: Write>(
         // owner
         let owner = dio.read_string_bypass(reader, writer)?.unwrap_or_default();
 
-        // with_oids (string)
+        // with_oids (string "true"/"false")
         let _with_oids = dio.read_string_bypass(reader, writer)?;
 
-        // Dependencies
+        // Dependencies (list of string-encoded ints)
+        // Python: while True: dep = read_string(); if not dep: break
         let mut dependencies = Vec::new();
         loop {
+            // read_string_bypass returns None if length <= 0
             let dep_str = dio.read_string_bypass(reader, writer)?;
             match dep_str {
                 Some(s) if !s.is_empty() => {
@@ -129,7 +131,7 @@ pub fn parse_toc<R: Read, W: Write>(
             }
         }
 
-        // data_state (byte, not int!)
+        // data_state (1 BYTE) - CRITICAL: python uses read_byte here, not read_int!
         let data_state_byte = DumpIO::read_byte(reader)?;
         writer.write_all(&[data_state_byte])?;
         let data_state = DataState::from_i32(data_state_byte as i32);

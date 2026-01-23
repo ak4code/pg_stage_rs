@@ -47,10 +47,7 @@ impl CustomHandler {
 
         let dio = DumpIO::new(header.int_size, header.offset_size);
 
-        // Process data blocks in order as they appear in the file
-        // In custom format, blocks appear sequentially after TOC
-        // Each block starts with block_type (1 byte) and dump_id (int)
-        // Block types: 0x01 = DATA, 0x02 = BLOBS, 0x04 = END
+        // Process data blocks
         loop {
             let mut block_type = [0u8; 1];
             match reader.read_exact(&mut block_type) {
@@ -68,7 +65,11 @@ impl CustomHandler {
 
             // Block type 0x01 = DATA
             if block_type[0] == 0x01 {
-                let dump_id = dio.read_int(&mut reader)?;
+                let dump_id = dio.read_int(&mut reader)
+                    .map_err(|e| {
+                        eprintln!("Failed to read dump_id after DATA block");
+                        e
+                    })?;
 
                 // Check if this dump_id is in our data_entries map
                 if let Some(info) = data_entries.get(&dump_id) {

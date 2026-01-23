@@ -10,6 +10,7 @@ use crate::format::custom::io::DumpIO;
 use crate::processor::DataProcessor;
 
 const OUTPUT_CHUNK_SIZE: usize = 512 * 1024; // 512KB
+const MAX_CHUNK_SIZE: usize = 50 * 1024 * 1024; // 50MB
 
 /// Processes data blocks in a custom format dump.
 pub struct BlockProcessor<'a> {
@@ -31,24 +32,81 @@ impl<'a> BlockProcessor<'a> {
         }
     }
 
-    /// Process a data block: read chunks, decompress, mutate, compress, write.
+    /// Process a data block: read chunks, decompress if needed, mutate, compress, write.
     pub fn process_block<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        match self.compression {
-            CompressionMethod::Zlib | CompressionMethod::Raw => {
-                self.process_compressed_block(reader, writer)
+        // Read and decompress all chunks into one buffer
+        let mut data = Vec::new();
+        let mut input_was_compressed = false;
+
+        loop {
+            let chunk_len = self.dio.read_int(reader)?;
+
+            if chunk_len == 0 {
+                break;
             }
-            CompressionMethod::None => self.process_uncompressed_block(reader, writer),
-            CompressionMethod::Lz4 => Err(PgStageError::CompressionError(
-                "LZ4 compression not yet supported".to_string(),
-            )),
+
+            let len = chunk_len.unsigned_abs() as usize;
+
+            // Validation
+            if len > MAX_CHUNK_SIZE {
+                return Err(PgStageError::InvalidFormat(format!(
+                    "Chunk size {} exceeds maximum {}",
+                    len, MAX_CHUNK_SIZE
+                )));
+            }
+
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf)?;
+
+            if chunk_len < 0 {
+                // Negative length = compressed data (standard pg_dump behavior)
+                input_was_compressed = true;
+                let decompressed = self.decompress_chunk(&buf)?;
+                data.extend_from_slice(&decompressed);
+            } else {
+                // Positive length = uncompressed data
+                data.extend_from_slice(&buf);
+            }
         }
+
+        if data.is_empty() {
+            // Empty block - write terminator only
+            self.dio.write_int(writer, 0)?;
+            return Ok(());
+        }
+
+        // Process lines (mutation)
+        let processed = self.process_lines(&data)?;
+
+        // Determine if we should compress the output.
+        // custom.py logic: if compression is ZLIB or RAW (which maps to Zlib behavior),
+        // it strictly compresses the output using zlib level 6.
+        if self.compression == CompressionMethod::Zlib {
+            self.compress_and_write(writer, &processed)?;
+        } else if self.compression == CompressionMethod::None {
+             self.write_uncompressed(writer, &processed)?;
+        } else {
+             // Fallback for Lz4/Zstd (not fully supported for write in this snippet).
+             // If input was compressed, we re-compress with Zlib to be safe/compact,
+             // otherwise uncompressed.
+             if input_was_compressed {
+                 self.compress_and_write(writer, &processed)?;
+             } else {
+                 self.write_uncompressed(writer, &processed)?;
+             }
+        }
+
+        // Terminator
+        self.dio.write_int(writer, 0)?;
+
+        Ok(())
     }
 
-    /// Pass through a block without mutation (for non-data or unmutated blocks).
+    /// Pass through a block without mutation.
     pub fn pass_through_block<R: Read, W: Write>(
         &self,
         reader: &mut R,
@@ -63,6 +121,14 @@ impl<'a> BlockProcessor<'a> {
             }
 
             let len = chunk_len.unsigned_abs() as usize;
+
+            if len > MAX_CHUNK_SIZE {
+                return Err(PgStageError::InvalidFormat(format!(
+                    "Chunk size {} exceeds maximum {}, stream may be corrupted",
+                    len, MAX_CHUNK_SIZE
+                )));
+            }
+
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf)?;
             writer.write_all(&buf)?;
@@ -70,93 +136,12 @@ impl<'a> BlockProcessor<'a> {
         Ok(())
     }
 
-    fn process_compressed_block<R: Read, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<()> {
-        // Read all compressed chunks into a buffer
-        let mut compressed_data = Vec::new();
-        loop {
-            let chunk_len = self.dio.read_int(reader)?;
-            if chunk_len == 0 {
-                break;
-            }
-            let len = chunk_len.unsigned_abs() as usize;
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf)?;
-            compressed_data.extend_from_slice(&buf);
-        }
-
-        if compressed_data.is_empty() {
-            // Write terminator
-            self.dio.write_int(writer, 0)?;
-            return Ok(());
-        }
-
-        // Decompress
-        let decompressed = self.decompress_data(&compressed_data)?;
-
-        // Process lines
-        let processed = self.process_lines(&decompressed)?;
-
-        // Compress and write in chunks
-        self.compress_and_write(writer, &processed)?;
-
-        // Write terminator chunk (length = 0)
-        self.dio.write_int(writer, 0)?;
-
-        Ok(())
-    }
-
-    fn process_uncompressed_block<R: Read, W: Write>(
-        &mut self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> Result<()> {
-        // Read all chunks
-        let mut data = Vec::new();
-        loop {
-            let chunk_len = self.dio.read_int(reader)?;
-            if chunk_len == 0 {
-                break;
-            }
-            let len = chunk_len.unsigned_abs() as usize;
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf)?;
-            data.extend_from_slice(&buf);
-        }
-
-        if data.is_empty() {
-            self.dio.write_int(writer, 0)?;
-            return Ok(());
-        }
-
-        // Process lines
-        let processed = self.process_lines(&data)?;
-
-        // Write in chunks (uncompressed)
-        let mut offset = 0;
-        while offset < processed.len() {
-            let end = (offset + OUTPUT_CHUNK_SIZE).min(processed.len());
-            let chunk = &processed[offset..end];
-            self.dio.write_int(writer, chunk.len() as i32)?;
-            writer.write_all(chunk)?;
-            offset = end;
-        }
-
-        // Write terminator
-        self.dio.write_int(writer, 0)?;
-
-        Ok(())
-    }
-
-    fn decompress_data(&self, compressed: &[u8]) -> Result<Vec<u8>> {
+    fn decompress_chunk(&self, compressed: &[u8]) -> Result<Vec<u8>> {
         let mut decoder = ZlibDecoder::new(compressed);
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).map_err(|e| {
-            PgStageError::CompressionError(format!("Zlib decompression failed: {}", e))
-        })?;
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(|e| PgStageError::CompressionError(format!("Zlib decompression failed: {}", e)))?;
         Ok(decompressed)
     }
 
@@ -176,11 +161,13 @@ impl<'a> BlockProcessor<'a> {
 
             if let Some(mutated) = self.processor.process_line(line) {
                 result.extend_from_slice(&mutated);
+                // Python custom.py _process_line_bytes adds \n if it wasn't empty result
+                // We add it if the original had it (standard pg COPY behavior)
+                // or if we are just rebuilding the block.
                 if end < data.len() {
                     result.push(b'\n');
                 }
             }
-            // If None, the line is deleted (table marked for deletion)
 
             start = if end < data.len() { end + 1 } else { end };
         }
@@ -188,22 +175,42 @@ impl<'a> BlockProcessor<'a> {
         Ok(result)
     }
 
+    fn write_uncompressed<W: Write>(&self, writer: &mut W, data: &[u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + OUTPUT_CHUNK_SIZE).min(data.len());
+            let chunk = &data[offset..end];
+            // Positive length = uncompressed data
+            self.dio.write_int(writer, chunk.len() as i32)?;
+            writer.write_all(chunk)?;
+            offset = end;
+        }
+        Ok(())
+    }
+
     fn compress_and_write<W: Write>(&self, writer: &mut W, data: &[u8]) -> Result<()> {
+        // Python uses zlib level 6
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-        encoder.write_all(data).map_err(|e| {
-            PgStageError::CompressionError(format!("Zlib compression failed: {}", e))
-        })?;
-        let compressed = encoder.finish().map_err(|e| {
-            PgStageError::CompressionError(format!("Zlib compression finish failed: {}", e))
-        })?;
+        encoder
+            .write_all(data)
+            .map_err(|e| PgStageError::CompressionError(format!("Zlib compression failed: {}", e)))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| PgStageError::CompressionError(format!("Zlib compression finish failed: {}", e)))?;
 
         // Write compressed data in chunks
         let mut offset = 0;
         while offset < compressed.len() {
             let end = (offset + OUTPUT_CHUNK_SIZE).min(compressed.len());
             let chunk = &compressed[offset..end];
+
+            // CRITICAL: custom.py writes POSITIVE integers for the length of compressed chunks!
+            // DumpIO::write_int writes [sign_byte, bytes...].
+            // Passing a positive length results in sign_byte 0.
+            // Standard pg_dump usually writes negative, but custom.py writes positive.
             self.dio.write_int(writer, chunk.len() as i32)?;
             writer.write_all(chunk)?;
+
             offset = end;
         }
 

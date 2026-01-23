@@ -8,8 +8,8 @@ use crate::format::MAGIC_HEADER;
 pub enum CompressionMethod {
     None,
     Zlib,
-    Raw,
     Lz4,
+    Zstd,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,6 @@ pub struct Header {
     pub offset_size: usize,
     pub format: u8,
     pub compression: CompressionMethod,
-    pub compression_raw: i32,
 }
 
 impl Header {
@@ -35,8 +34,6 @@ impl Header {
 }
 
 /// Parse the header from a custom format dump.
-/// Reads magic, version, int_size, offset_size, format, compression.
-/// Also writes all read bytes to the bypass writer.
 pub fn parse_header<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -45,8 +42,8 @@ pub fn parse_header<R: Read, W: Write>(
     // Write initial bytes (the magic we already consumed for detection)
     writer.write_all(initial_bytes)?;
 
-    // Read remaining magic if initial_bytes is partial, or validate if complete
-    let magic_remaining = MAGIC_HEADER.len() - initial_bytes.len();
+    // Read remaining magic if initial_bytes is partial
+    let magic_remaining = MAGIC_HEADER.len().saturating_sub(initial_bytes.len());
     if magic_remaining > 0 {
         let buf = DumpIO::read_exact(reader, magic_remaining)?;
         writer.write_all(&buf)?;
@@ -58,9 +55,9 @@ pub fn parse_header<R: Read, W: Write>(
                 "Invalid PGDMP magic header".to_string(),
             ));
         }
-    } else if initial_bytes.len() == MAGIC_HEADER.len() {
-        // If we already have full magic, validate it
-        if initial_bytes != MAGIC_HEADER {
+    } else if initial_bytes.len() >= MAGIC_HEADER.len() {
+        // Validate magic prefix
+        if &initial_bytes[..MAGIC_HEADER.len()] != MAGIC_HEADER {
             return Err(PgStageError::InvalidFormat(
                 "Invalid PGDMP magic header".to_string(),
             ));
@@ -75,9 +72,19 @@ pub fn parse_header<R: Read, W: Write>(
     let vrev = DumpIO::read_byte(reader)?;
     writer.write_all(&[vrev])?;
 
+    #[cfg(debug_assertions)]
+    eprintln!("pg_dump version: {}.{}.{}", vmaj, vmin, vrev);
+
+    // custom.py validation: < 1.12 or > 1.16 is unsupported
     if vmaj < 1 || (vmaj == 1 && vmin < 12) {
         return Err(PgStageError::UnsupportedVersion(format!(
-            "{}.{}.{}",
+            "Version {}.{}.{} is too old (min 1.12.0)",
+            vmaj, vmin, vrev
+        )));
+    }
+    if vmaj > 1 || (vmaj == 1 && vmin > 16) {
+        return Err(PgStageError::UnsupportedVersion(format!(
+            "Version {}.{}.{} is too new (max 1.16.0)",
             vmaj, vmin, vrev
         )));
     }
@@ -89,6 +96,16 @@ pub fn parse_header<R: Read, W: Write>(
     // Offset size
     let offset_size = DumpIO::read_byte(reader)? as usize;
     writer.write_all(&[offset_size as u8])?;
+
+    #[cfg(debug_assertions)]
+    eprintln!("int_size={}, offset_size={}", int_size, offset_size);
+
+    // Validate sizes
+    if int_size == 0 || int_size > 8 || offset_size == 0 || offset_size > 8 {
+        return Err(PgStageError::InvalidFormat(format!(
+            "Invalid int_size={} or offset_size={}", int_size, offset_size
+        )));
+    }
 
     // Format (should be 1 for custom)
     let format = DumpIO::read_byte(reader)?;
@@ -104,62 +121,70 @@ pub fn parse_header<R: Read, W: Write>(
     // Create DumpIO with parsed sizes
     let dio = DumpIO::new(int_size, offset_size);
 
-    // Compression method (mirrors Python custom.py logic)
-    let (compression, compression_raw) = if (vmaj, vmin, vrev) >= (1, 15, 0) {
-        // v1.15+ uses a single compression method byte
+    // Compression method
+    let compression = if (vmaj, vmin, vrev) >= (1, 15, 0) {
+        // v1.15+: 1 byte compression algorithm.
+        // NOTE: custom.py does NOT read the integer level following this byte for >= 1.15.
+        // It strictly reads 1 byte and maps it. Reading an extra int here causes desync.
         let mut buf = [0u8; 1];
         reader.read_exact(&mut buf)?;
         writer.write_all(&buf)?;
-        let compression_byte = buf[0];
+        let compression_algo = buf[0];
 
-        let method = match compression_byte {
+        match compression_algo {
             0 => CompressionMethod::None,
-            1 => CompressionMethod::Raw,
+            1 => CompressionMethod::Zlib, // custom.py calls this RAW but maps to zlib behavior
             2 => CompressionMethod::Lz4,
-            3 => CompressionMethod::Zlib,
+            3 => CompressionMethod::Zstd, // custom.py calls this ZLIB
             other => {
                 return Err(PgStageError::InvalidFormat(format!(
-                    "Unknown compression method byte {}",
+                    "Unknown compression algorithm byte {}",
                     other
                 )));
             }
-        };
-
-        (method, i32::from(compression_byte))
+        }
     } else {
-        // Pre-1.15: compression_raw is the zlib level
-        // -1 -> ZLIB, 0 -> NONE, 1..9 -> RAW, otherwise invalid
+        // Pre-1.15: compression field is the zlib level directly
+        // 0 = no compression
+        // -1 = default zlib (level 6)
+        // 1-9 = zlib with that level
         let level = dio.read_int_bypass(reader, writer)?;
-        let method = if level == -1 {
-            CompressionMethod::Zlib
-        } else if level == 0 {
+
+        if level == 0 {
             CompressionMethod::None
-        } else if (1..=9).contains(&level) {
-            CompressionMethod::Raw
+        } else if level == -1 || (1..=9).contains(&level) {
+            CompressionMethod::Zlib
         } else {
             return Err(PgStageError::InvalidFormat(format!(
                 "Invalid compression level {}",
                 level
             )));
-        };
-
-        (method, level)
+        }
     };
 
-    // sec (timestamp) - read and bypass
-    dio.read_int_bypass(reader, writer)?;
-    dio.read_int_bypass(reader, writer)?;
-    dio.read_int_bypass(reader, writer)?;
-    dio.read_int_bypass(reader, writer)?;
-    dio.read_int_bypass(reader, writer)?;
-    dio.read_int_bypass(reader, writer)?;
+    #[cfg(debug_assertions)]
+    eprintln!("Compression: {:?}", compression);
+
+    // Timestamp: custom.py reads 7 integers (sec, min, hour, mday, mon, year, isdst)
+    // The 7th integer is ignored in Python (_isdst), but must be read/written to maintain sync.
+    for _ in 0..7 {
+        dio.read_int_bypass(reader, writer)?;
+    }
 
     // Database name (string)
-    dio.read_string_bypass(reader, writer)?;
+    let _db_name = dio.read_string_bypass(reader, writer)?;
+    #[cfg(debug_assertions)]
+    eprintln!("Database: {:?}", _db_name);
+
     // Server version (string)
-    dio.read_string_bypass(reader, writer)?;
+    let _server_ver = dio.read_string_bypass(reader, writer)?;
+    #[cfg(debug_assertions)]
+    eprintln!("Server version: {:?}", _server_ver);
+
     // Dump version (string)
-    dio.read_string_bypass(reader, writer)?;
+    let _dump_ver = dio.read_string_bypass(reader, writer)?;
+    #[cfg(debug_assertions)]
+    eprintln!("pg_dump version string: {:?}", _dump_ver);
 
     Ok(Header {
         vmaj,
@@ -169,6 +194,5 @@ pub fn parse_header<R: Read, W: Write>(
         offset_size,
         format,
         compression,
-        compression_raw,
     })
 }

@@ -22,6 +22,12 @@ Reads a `pg_dump` output from stdin, applies data mutations defined via `COMMENT
 
 ## Installation
 
+Install rust and cargo, then run:
+```bash
+curl https://sh.rustup.rs -sSf | sh
+```
+
+Then install pg_stage_rs via cargo:
 ```bash
 cargo install --git https://github.com/ak4code/pg_stage_rs
 ```

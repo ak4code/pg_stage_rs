@@ -23,6 +23,7 @@ impl PlainHandler {
     ) -> Result<()> {
         let mut writer = BufWriter::with_capacity(65536, writer);
         let mut is_data = false;
+        let mut comment_buf: Option<String> = None;
 
         // If we have initial bytes, chain them with the reader
         let combined = std::io::Cursor::new(initial_bytes.to_vec()).chain(reader);
@@ -50,7 +51,30 @@ impl PlainHandler {
                 continue;
             }
 
-            // Try to parse as comment
+            // Handle multiline COMMENT accumulation
+            if let Some(ref mut buf) = comment_buf {
+                buf.push('\n');
+                buf.push_str(&line);
+                if line.ends_with("';") {
+                    let full_comment = buf.clone();
+                    comment_buf = None;
+                    self.processor.parse_comment(&full_comment);
+                    writer.write_all(full_comment.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+                continue;
+            }
+
+            // Detect start of a multiline COMMENT ON COLUMN/TABLE with 'anon:
+            if (line.starts_with("COMMENT ON COLUMN ") || line.starts_with("COMMENT ON TABLE "))
+                && line.contains("'anon: ")
+                && !line.ends_with("';")
+            {
+                comment_buf = Some(line);
+                continue;
+            }
+
+            // Try to parse as single-line comment
             self.processor.parse_comment(&line);
 
             // Try to parse as COPY statement

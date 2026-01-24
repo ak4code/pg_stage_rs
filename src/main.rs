@@ -3,15 +3,15 @@ use std::io::{self, Read};
 use clap::Parser;
 use regex::Regex;
 
-use pg_stage::error::Result;
-use pg_stage::format::custom::CustomHandler;
-use pg_stage::format::plain::PlainHandler;
-use pg_stage::format::{detect_format, DumpFormat};
-use pg_stage::processor::DataProcessor;
-use pg_stage::types::Locale;
+use pg_stage_rs::error::Result;
+use pg_stage_rs::format::custom::CustomHandler;
+use pg_stage_rs::format::plain::PlainHandler;
+use pg_stage_rs::format::{detect_format, DumpFormat};
+use pg_stage_rs::processor::DataProcessor;
+use pg_stage_rs::types::Locale;
 
 #[derive(Parser, Debug)]
-#[command(name = "pg_stage", version, about = "PostgreSQL dump anonymizer")]
+#[command(name = "pg_stage_rs", version, about = "PostgreSQL dump anonymizer")]
 struct Args {
     /// Locale for generated data (en, ru)
     #[arg(short, long, default_value = "en")]
@@ -32,7 +32,7 @@ struct Args {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("pg_stage error: {}", e);
+        eprintln!("pg_stage_rs error: {}", e);
         std::process::exit(1);
     }
 }

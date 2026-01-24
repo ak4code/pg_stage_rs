@@ -1,4 +1,4 @@
-# pg_stage
+# pg_stage_rs
 
 Streaming anonymizer for PostgreSQL dumps. Supports both plain text (`-Fp`) and custom binary (`-Fc`) formats.
 
@@ -19,25 +19,23 @@ Reads a `pg_dump` output from stdin, applies data mutations defined via `COMMENT
 ## Installation
 
 ```bash
-cargo build --release
+cargo install --git https://github.com/ak4code/pg_stage_rs
 ```
-
-The binary will be at `target/release/pg_stage`.
 
 ## Usage
 
 ```bash
 # Plain format (auto-detected)
-pg_dump -Fp mydb | pg_stage > anonymized.sql
+pg_dump -Fp mydb | pg_stage_rs > anonymized.sql
 
 # Custom format (auto-detected)
-pg_dump -Fc mydb | pg_stage > anonymized.dump
+pg_dump -Fc mydb | pg_stage_rs > anonymized.dump
 
 # Explicit format, Russian locale
-pg_dump -Fp mydb | pg_stage --locale ru --format plain > anonymized.sql
+pg_dump -Fp mydb | pg_stage_rs --locale ru --format plain > anonymized.sql
 
 # Delete specific tables by regex
-pg_dump -Fp mydb | pg_stage --delete-table-pattern "^audit_.*" > anonymized.sql
+pg_dump -Fp mydb | pg_stage_rs --delete-table-pattern "^audit_.*" > anonymized.sql
 ```
 
 ### CLI Options

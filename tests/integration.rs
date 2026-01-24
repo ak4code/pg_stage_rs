@@ -1,9 +1,9 @@
 use std::io::Cursor;
 
-use pg_stage::format::plain::PlainHandler;
-use pg_stage::format::{detect_format, DumpFormat};
-use pg_stage::processor::DataProcessor;
-use pg_stage::types::Locale;
+use pg_stage_rs::format::plain::PlainHandler;
+use pg_stage_rs::format::{detect_format, DumpFormat};
+use pg_stage_rs::processor::DataProcessor;
+use pg_stage_rs::types::Locale;
 
 fn make_processor() -> DataProcessor {
     DataProcessor::new(Locale::En, b'\t', vec![])

@@ -31,7 +31,7 @@ pub fn uuid5_by_source_value(ctx: &mut MutationContext) -> Result<String> {
         .unwrap_or_default();
 
     let today = Utc::now().format("%Y-%m-%d").to_string();
-    let name = format!("{}{}", source_value, today);
+    let name = format!("{}-{}", source_value, today);
     let uuid5 = Uuid::new_v5(&namespace, name.as_bytes());
     Ok(uuid5.to_string())
 }

@@ -3,10 +3,12 @@
 **/*.rs.bk
 **/*.rs.swp
 
-# staff
-custom.py
+# staff files
+*.log
+*.tmp
 *.dump
 
 # IDE's folders
 .idea
 .vscode
+.claude

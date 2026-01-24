@@ -9,19 +9,13 @@ use crate::types::Locale;
 
 pub fn email(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
+    let domains: &[&str] = match ctx.locale {
+        Locale::Ru => ru::EMAIL_DOMAINS,
+        _ => en::EMAIL_DOMAINS,
+    };
     let mut gen = || {
-        let (first, last, domains) = match ctx.locale {
-            Locale::En => (
-                en::FIRST_NAMES[ctx.rng.gen_range(0..en::FIRST_NAMES.len())].to_lowercase(),
-                en::LAST_NAMES[ctx.rng.gen_range(0..en::LAST_NAMES.len())].to_lowercase(),
-                en::EMAIL_DOMAINS,
-            ),
-            Locale::Ru => (
-                ru::FIRST_NAMES_MALE[ctx.rng.gen_range(0..ru::FIRST_NAMES_MALE.len())].to_lowercase(),
-                ru::LAST_NAMES_MALE[ctx.rng.gen_range(0..ru::LAST_NAMES_MALE.len())].to_lowercase(),
-                ru::EMAIL_DOMAINS,
-            ),
-        };
+        let first = en::FIRST_NAMES[ctx.rng.gen_range(0..en::FIRST_NAMES.len())].to_lowercase();
+        let last = en::LAST_NAMES[ctx.rng.gen_range(0..en::LAST_NAMES.len())].to_lowercase();
         let num: u32 = ctx.rng.gen_range(1..9999);
         let domain = domains[ctx.rng.gen_range(0..domains.len())];
         format!("{}.{}{}@{}", first, last, num, domain)
@@ -89,7 +83,12 @@ pub fn deterministic_phone(ctx: &mut MutationContext) -> Result<String> {
         .kwargs
         .get("obfuscated_numbers_count")
         .and_then(|v| v.as_u64())
-        .unwrap_or(4) as usize;
+        .ok_or_else(|| {
+            PgStageError::MissingParameter(
+                "obfuscated_numbers_count".to_string(),
+                "deterministic_phone_number".to_string(),
+            )
+        })? as usize;
 
     let secret_key = ctx
         .secrets
@@ -107,39 +106,55 @@ pub fn deterministic_phone(ctx: &mut MutationContext) -> Result<String> {
             "SECRET_KEY environment variable not set".to_string(),
         ));
     }
+    if nonce.is_empty() {
+        return Err(PgStageError::MutationError(
+            "SECRET_KEY_NONCE environment variable not set".to_string(),
+        ));
+    }
 
-    let digits_only: String = current_value.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits_only.len() < count {
+    // Find digit positions in the original string
+    let chars: Vec<char> = current_value.chars().collect();
+    let digit_positions: Vec<usize> = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .collect();
+
+    if digit_positions.len() < count {
         return Err(PgStageError::MutationError(
             "Not enough digits to obfuscate".to_string(),
         ));
     }
 
-    let message = format!("{}{}", current_value, nonce);
+    // Compute seed: HMAC(key=nonce+secret_key, msg="digits_permutation")
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+    let hmac_key = format!("{}{}", nonce, secret_key);
+    let mut mac = HmacSha256::new_from_slice(hmac_key.as_bytes())
         .map_err(|e| PgStageError::MutationError(e.to_string()))?;
-    mac.update(message.as_bytes());
-    let result = mac.finalize();
-    let hash_bytes = result.into_bytes();
+    mac.update(b"digits_permutation");
+    let hash_bytes = mac.finalize().into_bytes();
 
-    // Extract digits from hash into a Vec for O(1) indexing
-    let new_digits: Vec<u8> = hash_bytes.iter()
-        .take(count)
-        .map(|byte| b'0' + (byte % 10))
+    // Use hash as seed for deterministic RNG
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes.copy_from_slice(&hash_bytes[..32]);
+    let mut rng = rand::rngs::StdRng::from_seed(seed_bytes);
+
+    // Collect last N digits and shuffle them deterministically
+    let start_idx = digit_positions.len() - count;
+    let positions_to_shuffle = &digit_positions[start_idx..];
+    let mut digits_to_shuffle: Vec<char> = positions_to_shuffle
+        .iter()
+        .map(|&pos| chars[pos])
         .collect();
+    digits_to_shuffle.shuffle(&mut rng);
 
-    // Replace last `count` digits in original value
-    let mut result_chars: Vec<char> = current_value.chars().collect();
-    let mut replaced = 0;
-    for i in (0..result_chars.len()).rev() {
-        if result_chars[i].is_ascii_digit() && replaced < count {
-            let digit_idx = count - 1 - replaced;
-            if digit_idx < new_digits.len() {
-                result_chars[i] = new_digits[digit_idx] as char;
-            }
-            replaced += 1;
-        }
+    // Put shuffled digits back, preserving formatting
+    let mut result_chars = chars;
+    for (i, &pos) in positions_to_shuffle.iter().enumerate() {
+        result_chars[pos] = digits_to_shuffle[i];
     }
 
     Ok(result_chars.into_iter().collect())

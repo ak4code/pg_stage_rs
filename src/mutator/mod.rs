@@ -16,8 +16,6 @@ use crate::error::{PgStageError, Result};
 use crate::types::Locale;
 use crate::unique::UniqueTracker;
 
-use warlocks_cauldron::ComplexProvider;
-
 pub struct MutationContext<'a> {
     pub kwargs: &'a HashMap<String, serde_json::Value>,
     pub current_value: String,
@@ -26,8 +24,6 @@ pub struct MutationContext<'a> {
     pub locale: Locale,
     pub secrets: &'a HashMap<String, String>,
     pub obfuscated_values: &'a HashMap<String, String>,
-    // Reusable warlocks provider for hot-path generators
-    pub provider: &'a ComplexProvider<'static>,
 }
 
 impl<'a> MutationContext<'a> {

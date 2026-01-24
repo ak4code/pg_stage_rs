@@ -1,27 +1,15 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use regex::Regex;
-use warlocks_cauldron::{ComplexProvider, Locale as WLocale};
 
 use crate::conditions::check_conditions;
 use crate::mutator::{dispatch_mutation, MutationContext};
 use crate::relations::RelationTracker;
 use crate::types::{Locale, MutationMap, MutationSpec, TableMutationMap, TableMutationSpec};
 use crate::unique::UniqueTracker;
-
-pub static PROVIDER_EN: LazyLock<ComplexProvider<'static>> = LazyLock::new(|| ComplexProvider::new(&WLocale::EN));
-pub static PROVIDER_RU: LazyLock<ComplexProvider<'static>> = LazyLock::new(|| ComplexProvider::new(&WLocale::RU));
-
-fn get_provider_for_locale(locale: Locale) -> &'static ComplexProvider<'static> {
-    match locale {
-        Locale::En => &PROVIDER_EN,
-        Locale::Ru => &PROVIDER_RU,
-    }
-}
 
 pub struct DataProcessor {
     pub mutation_map: MutationMap,
@@ -44,9 +32,6 @@ pub struct DataProcessor {
     relation_tracker: RelationTracker,
     secrets: HashMap<String, String>,
 
-    // warlocks provider reused across contexts
-    provider: &'static ComplexProvider<'static>,
-
     // Regex patterns
     comment_column_re: Regex,
     comment_table_re: Regex,
@@ -66,9 +51,6 @@ impl DataProcessor {
             m
         };
 
-        // Choose static provider for the requested locale
-        let provider = get_provider_for_locale(locale);
-
         Self {
             mutation_map: HashMap::new(),
             table_mutations: HashMap::new(),
@@ -85,7 +67,6 @@ impl DataProcessor {
             unique_tracker: UniqueTracker::new(),
             relation_tracker: RelationTracker::new(),
             secrets,
-            provider,
             comment_column_re: Regex::new(
                 r"COMMENT ON COLUMN ([\d\w_\.]+) IS 'anon: ([\s\S]*)';",
             )
@@ -256,7 +237,6 @@ impl DataProcessor {
                     locale: self.locale,
                     secrets: &self.secrets,
                     obfuscated_values: &obfuscated_values,
-                    provider: self.provider,
                 };
 
                 match dispatch_mutation(&spec.mutation_name, &mut ctx) {

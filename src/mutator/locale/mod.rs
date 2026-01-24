@@ -3,8 +3,10 @@ pub mod ru;
 
 use rand::Rng;
 
-use warlocks_cauldron as warlocks;
-
-pub fn get_patronymic(_rng: &mut impl Rng) -> String {
-    warlocks::RussiaSpecProvider::patronymic(None)
+pub fn get_patronymic(rng: &mut impl Rng) -> String {
+    if rng.gen_bool(0.5) {
+        ru::PATRONYMICS_MALE[rng.gen_range(0..ru::PATRONYMICS_MALE.len())].to_string()
+    } else {
+        ru::PATRONYMICS_FEMALE[rng.gen_range(0..ru::PATRONYMICS_FEMALE.len())].to_string()
+    }
 }

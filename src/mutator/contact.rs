@@ -3,16 +3,27 @@ use rand::Rng;
 use sha2::Sha256;
 
 use crate::error::{PgStageError, Result};
+use crate::mutator::locale::{en, ru};
 use crate::mutator::MutationContext;
+use crate::types::Locale;
 
 pub fn email(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
     let mut gen = || {
-        let first = ctx.provider.person.first_name(None).to_string().to_lowercase();
-        let last = ctx.provider.person.last_name(None).to_lowercase();
+        let (first, last, domains) = match ctx.locale {
+            Locale::En => (
+                en::FIRST_NAMES[ctx.rng.gen_range(0..en::FIRST_NAMES.len())].to_lowercase(),
+                en::LAST_NAMES[ctx.rng.gen_range(0..en::LAST_NAMES.len())].to_lowercase(),
+                en::EMAIL_DOMAINS,
+            ),
+            Locale::Ru => (
+                ru::FIRST_NAMES_MALE[ctx.rng.gen_range(0..ru::FIRST_NAMES_MALE.len())].to_lowercase(),
+                ru::LAST_NAMES_MALE[ctx.rng.gen_range(0..ru::LAST_NAMES_MALE.len())].to_lowercase(),
+                ru::EMAIL_DOMAINS,
+            ),
+        };
         let num: u32 = ctx.rng.gen_range(1..9999);
-        let email = warlocks_cauldron::Person::email(None, false);
-        let domain = email.split('@').nth(1).unwrap_or("example.com").to_string();
+        let domain = domains[ctx.rng.gen_range(0..domains.len())];
         format!("{}.{}{}@{}", first, last, num, domain)
     };
     if unique {
@@ -48,12 +59,27 @@ pub fn phone_number(ctx: &mut MutationContext) -> Result<String> {
 
 pub fn address(ctx: &mut MutationContext) -> Result<String> {
     let unique = ctx.get_bool_kwarg("unique");
+    let mut gen = || match ctx.locale {
+        Locale::En => {
+            let num = ctx.rng.gen_range(1..1400);
+            let street = en::STREET_NAMES[ctx.rng.gen_range(0..en::STREET_NAMES.len())];
+            let suffix = en::STREET_SUFFIXES[ctx.rng.gen_range(0..en::STREET_SUFFIXES.len())];
+            let city = en::CITIES[ctx.rng.gen_range(0..en::CITIES.len())];
+            let state = en::STATES[ctx.rng.gen_range(0..en::STATES.len())];
+            format!("{} {} {}, {}, {}", num, street, suffix, city, state)
+        }
+        Locale::Ru => {
+            let city = ru::CITIES[ctx.rng.gen_range(0..ru::CITIES.len())];
+            let street_type = ru::STREET_TYPES[ctx.rng.gen_range(0..ru::STREET_TYPES.len())];
+            let street = ru::STREETS[ctx.rng.gen_range(0..ru::STREETS.len())];
+            let num = ctx.rng.gen_range(1..200);
+            format!("{}, {} {}, {}", city, street_type, street, num)
+        }
+    };
     if unique {
-        ctx.unique_tracker.generate_unique(|| {
-            ctx.provider.address.full_address()
-        })
+        ctx.unique_tracker.generate_unique(gen)
     } else {
-        Ok(ctx.provider.address.full_address())
+        Ok(gen())
     }
 }
 

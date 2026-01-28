@@ -259,7 +259,13 @@ impl DataProcessor {
                         result_values[col_idx] = Cow::Owned(new_val);
                         break;
                     }
-                    Err(_) => continue,
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: mutation '{}' failed for column '{}': {}",
+                            spec.mutation_name, col_name, e
+                        );
+                        continue;
+                    }
                 }
             }
         }

@@ -73,7 +73,7 @@ pub fn parse_header<R: Read, W: Write>(
     writer.write_all(&[vrev])?;
 
     #[cfg(debug_assertions)]
-    eprintln!("pg_dump version: {}.{}.{}", vmaj, vmin, vrev);
+    eprintln!("[DEBUG] pg_dump format version: {}.{}.{}", vmaj, vmin, vrev);
 
     // custom.py validation: < 1.12 or > 1.16 is unsupported
     if vmaj < 1 || (vmaj == 1 && vmin < 12) {
@@ -98,7 +98,7 @@ pub fn parse_header<R: Read, W: Write>(
     writer.write_all(&[offset_size as u8])?;
 
     #[cfg(debug_assertions)]
-    eprintln!("int_size={}, offset_size={}", int_size, offset_size);
+    eprintln!("[DEBUG] int_size={}, offset_size={}", int_size, offset_size);
 
     // Validate sizes
     if int_size == 0 || int_size > 8 || offset_size == 0 || offset_size > 8 {
@@ -163,7 +163,7 @@ pub fn parse_header<R: Read, W: Write>(
     };
 
     #[cfg(debug_assertions)]
-    eprintln!("Compression: {:?}", compression);
+    eprintln!("[DEBUG] Compression: {:?}", compression);
 
     // Timestamp: custom.py reads 7 integers (sec, min, hour, mday, mon, year, isdst)
     // The 7th integer is ignored in Python (_isdst), but must be read/written to maintain sync.

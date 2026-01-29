@@ -1,6 +1,6 @@
 [package]
 name = "pg_stage_rs"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "PostgreSQL dump anonymizer - streaming obfuscation for plain and custom formats"
 

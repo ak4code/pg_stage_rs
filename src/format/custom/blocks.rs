@@ -114,76 +114,84 @@ impl<'a> BlockProcessor<'a> {
     }
 
     /// Pass through a block without mutation.
+    /// Optimized to coalesce many small chunks into larger output chunks.
     pub fn pass_through_block<R: Read, W: Write>(
         &self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        loop {
-            let chunk_len = self.dio.read_int(reader)?;
-            self.dio.write_int(writer, chunk_len)?;
+        // Use ChunkReader to efficiently read many small chunks
+        let mut chunk_reader = ChunkReader::new(reader, self.dio);
+        let mut read_buf = vec![0u8; READ_BUF_SIZE];
+        let mut output_buf: Vec<u8> = Vec::with_capacity(OUTPUT_CHUNK_SIZE * 2);
 
-            if chunk_len == 0 {
+        loop {
+            let n = chunk_reader.read(&mut read_buf)?;
+            if n == 0 {
                 break;
             }
 
-            let len = chunk_len.unsigned_abs() as usize;
+            output_buf.extend_from_slice(&read_buf[..n]);
 
-            if len > MAX_CHUNK_SIZE {
-                return Err(PgStageError::InvalidFormat(format!(
-                    "Chunk size {} exceeds maximum {}, stream may be corrupted",
-                    len, MAX_CHUNK_SIZE
-                )));
+            // Flush when buffer is large enough
+            if output_buf.len() >= OUTPUT_CHUNK_SIZE {
+                for chunk in output_buf.chunks(OUTPUT_CHUNK_SIZE) {
+                    self.dio.write_int(writer, chunk.len() as i32)?;
+                    writer.write_all(chunk)?;
+                }
+                output_buf.clear();
             }
-
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf)?;
-            writer.write_all(&buf)?;
         }
+
+        // Write remaining data
+        if !output_buf.is_empty() {
+            self.dio.write_int(writer, output_buf.len() as i32)?;
+            writer.write_all(&output_buf)?;
+        }
+
+        // Terminator
+        self.dio.write_int(writer, 0)?;
         Ok(())
     }
 
     /// Streaming processing for uncompressed blocks.
-    /// Reads chunks one at a time, processes complete lines, writes output immediately.
+    /// Uses ChunkReader to buffer small chunks efficiently (critical for -Z0 dumps
+    /// which can have millions of tiny chunks).
     fn process_block_uncompressed<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
+        // Use ChunkReader to efficiently buffer many small chunks into large reads
+        let mut chunk_reader = ChunkReader::new(reader, self.dio);
+
+        let mut read_buf = vec![0u8; READ_BUF_SIZE];
         let mut line_tail: Vec<u8> = Vec::new();
         let mut output_buf: Vec<u8> = Vec::with_capacity(OUTPUT_CHUNK_SIZE * 2);
 
         loop {
-            let chunk_len = self.dio.read_int(reader)?;
-            if chunk_len == 0 {
+            // Read large buffer from ChunkReader (it handles chunk boundaries internally)
+            let n = chunk_reader.read(&mut read_buf)?;
+            if n == 0 {
                 break;
             }
 
-            let len = chunk_len.unsigned_abs() as usize;
-            if len > MAX_CHUNK_SIZE {
-                return Err(PgStageError::InvalidFormat(format!(
-                    "Chunk size {} exceeds maximum {}",
-                    len, MAX_CHUNK_SIZE
-                )));
-            }
-
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf)?;
-
-            // Prepend leftover from previous chunk
+            // Combine with leftover from previous iteration
             let data = if line_tail.is_empty() {
-                buf
+                &read_buf[..n]
             } else {
-                let mut combined = std::mem::take(&mut line_tail);
-                combined.extend_from_slice(&buf);
-                combined
+                line_tail.extend_from_slice(&read_buf[..n]);
+                line_tail.as_slice()
             };
 
             // Split into complete lines + tail
-            match memrchr(b'\n', &data) {
+            match memrchr(b'\n', data) {
                 Some(last_nl) => {
-                    line_tail = data[last_nl + 1..].to_vec();
-                    self.process_complete_lines(&data[..=last_nl], &mut output_buf);
+                    let complete = &data[..=last_nl];
+                    let tail = &data[last_nl + 1..];
+
+                    self.process_complete_lines(complete, &mut output_buf);
+                    line_tail = tail.to_vec();
 
                     // Flush output when large enough
                     if output_buf.len() >= OUTPUT_CHUNK_SIZE {
@@ -191,7 +199,10 @@ impl<'a> BlockProcessor<'a> {
                     }
                 }
                 None => {
-                    line_tail = data;
+                    if line_tail.is_empty() {
+                        line_tail = read_buf[..n].to_vec();
+                    }
+                    // else: data already IS line_tail (extended above), keep as-is
                 }
             }
         }

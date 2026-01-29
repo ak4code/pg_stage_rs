@@ -66,10 +66,7 @@ impl CustomHandler {
 
             // Block type 0x01 = DATA
             if block_type[0] == 0x01 {
-                let dump_id = dio.read_int(&mut reader)
-                    .inspect_err(|_| {
-                        eprintln!("Failed to read dump_id after DATA block");
-                    })?;
+                let dump_id = dio.read_int(&mut reader)?;
 
                 // Check if this dump_id is in our data_entries map
                 if let Some(info) = data_entries.get(&dump_id) {

@@ -64,11 +64,15 @@ pub fn parse_toc<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     header: &Header,
+    verbose: bool,
 ) -> Result<Vec<TocEntry>> {
     let dio = DumpIO::new(header.int_size, header.offset_size);
 
     // Read TOC count
     let toc_count = dio.read_int_bypass(reader, writer)?;
+    if verbose {
+        eprintln!("[INFO] TOC entries: {}", toc_count);
+    }
     let mut entries = Vec::with_capacity(toc_count.max(0) as usize);
 
     for _ in 0..toc_count {

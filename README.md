@@ -46,6 +46,14 @@ pg_dump -Fp mydb | pg_stage_rs --locale ru --format plain > anonymized.sql
 
 # Delete specific tables by regex
 pg_dump -Fp mydb | pg_stage_rs --delete-table-pattern "^audit_.*" > anonymized.sql
+
+# Verbose mode (show dump metadata)
+pg_dump -Fc mydb | pg_stage_rs --verbose > anonymized.dump
+# Output to stderr:
+#   [INFO] pg_dump format version: 1.16.0
+#   [INFO] Compression: Zlib
+#   [INFO] Database: "mydb"
+#   [INFO] TOC entries: 1234
 ```
 
 ### CLI Options
@@ -55,6 +63,7 @@ pg_dump -Fp mydb | pg_stage_rs --delete-table-pattern "^audit_.*" > anonymized.s
 | `-l, --locale` | `en` | Locale for generated data (`en`, `ru`) |
 | `-d, --delimiter` | `\t` | Column delimiter character |
 | `-f, --format` | auto | Force format: `plain`/`p`, `custom`/`c` |
+| `-v, --verbose` | off | Show dump info: format version, compression, TOC count |
 | `--delete-table-pattern` | -- | Regex pattern for tables to remove (repeatable) |
 
 ## Defining Mutations

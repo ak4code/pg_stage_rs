@@ -156,6 +156,10 @@ impl DataProcessor {
     /// Process a single data line (tab-separated values).
     /// Returns None if the line should be deleted.
     /// Returns Some(mutated_line) otherwise.
+    ///
+    /// Note: Callers should check has_mutations() and is_delete() first
+    /// for bulk operations to avoid per-line overhead.
+    #[inline]
     pub fn process_line(&mut self, line: &[u8]) -> Option<Vec<u8>> {
         if self.is_delete_table {
             return None;

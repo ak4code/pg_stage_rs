@@ -30,9 +30,8 @@ impl CustomHandler {
         writer: W,
         initial_bytes: &[u8],
     ) -> Result<()> {
-        // Large buffers for better throughput on big dumps (2MB each)
-        let mut reader = BufReader::with_capacity(2 * 1024 * 1024, reader);
-        let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, writer);
+        let mut reader = BufReader::with_capacity(65536, reader);
+        let mut writer = BufWriter::with_capacity(65536, writer);
 
         // Parse header (bypasses to output)
         let header = parse_header(&mut reader, &mut writer, initial_bytes)?;

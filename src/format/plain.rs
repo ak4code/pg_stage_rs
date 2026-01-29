@@ -21,14 +21,13 @@ impl PlainHandler {
         writer: W,
         initial_bytes: &[u8],
     ) -> Result<()> {
-        // Large buffers for better throughput (2MB each)
-        let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, writer);
+        let mut writer = BufWriter::with_capacity(65536, writer);
         let mut is_data = false;
         let mut comment_buf: Option<String> = None;
 
         // If we have initial bytes, chain them with the reader
         let combined = std::io::Cursor::new(initial_bytes.to_vec()).chain(reader);
-        let buf_reader = BufReader::with_capacity(2 * 1024 * 1024, combined);
+        let buf_reader = BufReader::with_capacity(65536, combined);
 
         for line_result in buf_reader.lines() {
             let line = line_result?;

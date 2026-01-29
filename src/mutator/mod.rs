@@ -18,7 +18,7 @@ use crate::unique::UniqueTracker;
 
 pub struct MutationContext<'a> {
     pub kwargs: &'a HashMap<String, serde_json::Value>,
-    pub current_value: &'a str,  // Changed from String to &str to avoid allocation
+    pub current_value: String,
     pub rng: &'a mut ThreadRng,
     pub unique_tracker: &'a mut UniqueTracker,
     pub locale: Locale,

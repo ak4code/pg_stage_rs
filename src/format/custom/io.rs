@@ -89,15 +89,16 @@ impl DumpIO {
             (0u8, val)
         };
 
-        // Write sign + magnitude in one syscall (max 9 bytes: 1 sign + 8 magnitude)
-        let mut buf = [0u8; 9];
-        buf[0] = sign;
+        // Sign byte
+        writer.write_all(&[sign])?;
+
+        // Magnitude bytes (little-endian)
         let mut current = v_abs;
-        for i in 0..self.int_size {
-            buf[1 + i] = (current & 0xFF) as u8;
+        for _ in 0..self.int_size {
+            let byte = (current & 0xFF) as u8;
+            writer.write_all(&[byte])?;
             current >>= 8;
         }
-        writer.write_all(&buf[..1 + self.int_size])?;
 
         Ok(())
     }

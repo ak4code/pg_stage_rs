@@ -179,9 +179,7 @@ impl DataProcessor {
 
         // Use Cow to avoid allocating Strings for unmodified columns
         let mut result_values: Vec<Cow<'_, str>> = values.iter().map(|&s| Cow::Borrowed(s)).collect();
-
-        // Pre-allocate with expected capacity to reduce reallocations
-        let mut obfuscated_values: HashMap<String, String> = HashMap::with_capacity(self.current_mutations.len());
+        let mut obfuscated_values: HashMap<String, String> = HashMap::new();
 
         // Iterate by index to avoid cloning sorted_columns
         for col_sort_idx in 0..self.sorted_columns.len() {
@@ -197,6 +195,8 @@ impl DataProcessor {
                 None => continue,
             };
 
+            let current_value = result_values[col_idx].to_string();
+
             // Try each mutation spec in order
             for spec in specs.iter() {
                 // Check conditions — borrow of result_values ends after this call (NLL)
@@ -209,11 +209,11 @@ impl DataProcessor {
                     let mut relation_found = false;
                     for relation in &spec.relations {
                         if let Some(&from_idx) = self.column_indices.get(&relation.from_column_name) {
-                            let fk_value = result_values[from_idx].as_ref();
+                            let fk_value = result_values[from_idx].to_string();
                             if let Some(existing) = self.relation_tracker.lookup(
                                 &relation.table_name,
                                 &relation.to_column_name,
-                                fk_value,
+                                &fk_value,
                             ) {
                                 let val = existing.clone();
                                 obfuscated_values.insert(col_name.clone(), val.clone());
@@ -228,13 +228,10 @@ impl DataProcessor {
                     }
                 }
 
-                // Get current value as &str to avoid allocation
-                let current_value = result_values[col_idx].as_ref();
-
                 // Dispatch mutation
                 let mut ctx = MutationContext {
                     kwargs: &spec.mutation_kwargs,
-                    current_value,
+                    current_value: current_value.clone(),
                     rng: &mut self.rng,
                     unique_tracker: &mut self.unique_tracker,
                     locale: self.locale,
@@ -248,10 +245,11 @@ impl DataProcessor {
                         if !spec.relations.is_empty() {
                             for relation in &spec.relations {
                                 if let Some(&from_idx) = self.column_indices.get(&relation.from_column_name) {
+                                    let fk_value = result_values[from_idx].to_string();
                                     self.relation_tracker.store(
                                         &relation.table_name,
                                         &relation.to_column_name,
-                                        result_values[from_idx].as_ref(),
+                                        &fk_value,
                                         &new_val,
                                     );
                                 }

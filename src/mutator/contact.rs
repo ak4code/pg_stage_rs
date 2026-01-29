@@ -78,7 +78,7 @@ pub fn address(ctx: &mut MutationContext) -> Result<String> {
 }
 
 pub fn deterministic_phone(ctx: &mut MutationContext) -> Result<String> {
-    let current_value = ctx.current_value.clone();
+    let current_value = ctx.current_value;
     let count = ctx
         .kwargs
         .get("obfuscated_numbers_count")

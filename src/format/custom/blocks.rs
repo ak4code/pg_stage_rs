@@ -15,14 +15,15 @@ use crate::processor::DataProcessor;
 const OUTPUT_CHUNK_SIZE: usize = 1024 * 1024; // 1MB for better throughput
 const MAX_CHUNK_SIZE: usize = 50 * 1024 * 1024; // 50MB
 const READ_BUF_SIZE: usize = 2 * 1024 * 1024; // 2MB read buffer
+const COALESCE_TARGET: usize = 256 * 1024; // Accumulate at least 256KB before returning
 
-/// Streaming reader that reads chunks on-demand instead of loading entire block into memory.
-/// This is critical for large tables (100M+ rows) where compressed blocks can be several GB.
+/// Streaming reader that coalesces many small chunks into larger reads.
+/// Critical for -Z0 dumps which can have millions of tiny (~100 byte) chunks.
 struct ChunkReader<'a, R: Read> {
     reader: &'a mut R,
     dio: &'a DumpIO,
-    current_chunk: Vec<u8>,
-    chunk_pos: usize,
+    buffer: Vec<u8>,
+    buf_pos: usize,
     done: bool,
 }
 
@@ -31,28 +32,28 @@ impl<'a, R: Read> ChunkReader<'a, R> {
         Self {
             reader,
             dio,
-            current_chunk: Vec::with_capacity(OUTPUT_CHUNK_SIZE),
-            chunk_pos: 0,
+            buffer: Vec::with_capacity(COALESCE_TARGET * 2),
+            buf_pos: 0,
             done: false,
         }
     }
-}
 
-impl<R: Read> Read for ChunkReader<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // If current chunk exhausted, read next one
-        if self.chunk_pos >= self.current_chunk.len() {
-            if self.done {
-                return Ok(0);
-            }
+    /// Read multiple chunks until we have at least COALESCE_TARGET bytes or hit end
+    fn fill_buffer(&mut self) -> io::Result<()> {
+        // Move remaining data to front
+        if self.buf_pos > 0 {
+            self.buffer.drain(..self.buf_pos);
+            self.buf_pos = 0;
+        }
 
-            // Read next chunk length
+        // Read chunks until we have enough data
+        while self.buffer.len() < COALESCE_TARGET {
             let chunk_len = self.dio.read_int(self.reader)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
             if chunk_len == 0 {
                 self.done = true;
-                return Ok(0);
+                break;
             }
 
             let len = chunk_len.unsigned_abs() as usize;
@@ -63,17 +64,34 @@ impl<R: Read> Read for ChunkReader<'_, R> {
                 ));
             }
 
-            // Read chunk data
-            self.current_chunk.resize(len, 0);
-            self.reader.read_exact(&mut self.current_chunk)?;
-            self.chunk_pos = 0;
+            // Read directly into buffer
+            let start = self.buffer.len();
+            self.buffer.resize(start + len, 0);
+            self.reader.read_exact(&mut self.buffer[start..])?;
         }
 
-        // Copy data from current chunk to output buffer
-        let available = self.current_chunk.len() - self.chunk_pos;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for ChunkReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Refill if buffer is exhausted or low
+        if self.buf_pos >= self.buffer.len() {
+            if self.done {
+                return Ok(0);
+            }
+            self.fill_buffer()?;
+            if self.buffer.is_empty() {
+                return Ok(0);
+            }
+        }
+
+        // Copy from internal buffer to output
+        let available = self.buffer.len() - self.buf_pos;
         let to_copy = available.min(buf.len());
-        buf[..to_copy].copy_from_slice(&self.current_chunk[self.chunk_pos..self.chunk_pos + to_copy]);
-        self.chunk_pos += to_copy;
+        buf[..to_copy].copy_from_slice(&self.buffer[self.buf_pos..self.buf_pos + to_copy]);
+        self.buf_pos += to_copy;
         Ok(to_copy)
     }
 }
@@ -386,6 +404,18 @@ impl<'a> BlockProcessor<'a> {
 
     /// Process complete lines (each ending with \n) and append results to output buffer.
     fn process_complete_lines(&mut self, data: &[u8], output: &mut Vec<u8>) {
+        // Fast path: if table is being deleted, skip all data
+        if self.processor.is_delete() {
+            return;
+        }
+
+        // Fast path: if no mutations, copy data directly
+        if !self.processor.has_mutations() {
+            output.extend_from_slice(data);
+            return;
+        }
+
+        // Slow path: process line by line
         use memchr::memchr;
         let mut start = 0;
         while start < data.len() {
@@ -407,6 +437,19 @@ impl<'a> BlockProcessor<'a> {
 
     /// Process complete lines and write results to a Write impl (encoder).
     fn process_complete_lines_to_writer<W: Write>(&mut self, data: &[u8], writer: &mut W) -> Result<()> {
+        // Fast path: if table is being deleted, skip all data
+        if self.processor.is_delete() {
+            return Ok(());
+        }
+
+        // Fast path: if no mutations, write data directly
+        if !self.processor.has_mutations() {
+            writer.write_all(data)
+                .map_err(|e| PgStageError::CompressionError(format!("Write failed: {}", e)))?;
+            return Ok(());
+        }
+
+        // Slow path: process line by line
         use memchr::memchr;
         let mut start = 0;
         while start < data.len() {

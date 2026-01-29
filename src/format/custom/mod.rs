@@ -15,11 +15,18 @@ use crate::processor::DataProcessor;
 /// Handler for PostgreSQL custom format dumps (-Fc).
 pub struct CustomHandler {
     processor: DataProcessor,
+    verbose: bool,
 }
 
 impl CustomHandler {
     pub fn new(processor: DataProcessor) -> Self {
-        Self { processor }
+        Self { processor, verbose: false }
+    }
+
+    /// Enable verbose output
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 
     /// Process a custom format dump from reader to writer.
@@ -35,10 +42,10 @@ impl CustomHandler {
         let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, writer);
 
         // Parse header (bypasses to output)
-        let header = parse_header(&mut reader, &mut writer, initial_bytes)?;
+        let header = parse_header(&mut reader, &mut writer, initial_bytes, self.verbose)?;
 
         // Parse TOC entries (bypasses to output)
-        let entries = parse_toc(&mut reader, &mut writer, &header)?;
+        let entries = parse_toc(&mut reader, &mut writer, &header, self.verbose)?;
 
         // Extract comments from TOC entries to build mutation map
         self.extract_comments(&entries);

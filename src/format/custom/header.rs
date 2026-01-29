@@ -38,6 +38,7 @@ pub fn parse_header<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     initial_bytes: &[u8],
+    verbose: bool,
 ) -> Result<Header> {
     // Write initial bytes (the magic we already consumed for detection)
     writer.write_all(initial_bytes)?;
@@ -72,8 +73,9 @@ pub fn parse_header<R: Read, W: Write>(
     let vrev = DumpIO::read_byte(reader)?;
     writer.write_all(&[vrev])?;
 
-    #[cfg(debug_assertions)]
-    eprintln!("[DEBUG] pg_dump format version: {}.{}.{}", vmaj, vmin, vrev);
+    if verbose {
+        eprintln!("[INFO] pg_dump format version: {}.{}.{}", vmaj, vmin, vrev);
+    }
 
     // custom.py validation: < 1.12 or > 1.16 is unsupported
     if vmaj < 1 || (vmaj == 1 && vmin < 12) {
@@ -97,8 +99,9 @@ pub fn parse_header<R: Read, W: Write>(
     let offset_size = DumpIO::read_byte(reader)? as usize;
     writer.write_all(&[offset_size as u8])?;
 
-    #[cfg(debug_assertions)]
-    eprintln!("[DEBUG] int_size={}, offset_size={}", int_size, offset_size);
+    if verbose {
+        eprintln!("[INFO] int_size={}, offset_size={}", int_size, offset_size);
+    }
 
     // Validate sizes
     if int_size == 0 || int_size > 8 || offset_size == 0 || offset_size > 8 {
@@ -162,8 +165,9 @@ pub fn parse_header<R: Read, W: Write>(
         }
     };
 
-    #[cfg(debug_assertions)]
-    eprintln!("[DEBUG] Compression: {:?}", compression);
+    if verbose {
+        eprintln!("[INFO] Compression: {:?}", compression);
+    }
 
     // Timestamp: custom.py reads 7 integers (sec, min, hour, mday, mon, year, isdst)
     // The 7th integer is ignored in Python (_isdst), but must be read/written to maintain sync.
@@ -172,19 +176,22 @@ pub fn parse_header<R: Read, W: Write>(
     }
 
     // Database name (string)
-    let _db_name = dio.read_string_bypass(reader, writer)?;
-    #[cfg(debug_assertions)]
-    eprintln!("Database: {:?}", _db_name);
+    let db_name = dio.read_string_bypass(reader, writer)?;
+    if verbose {
+        eprintln!("[INFO] Database: {:?}", db_name.as_deref().unwrap_or(""));
+    }
 
     // Server version (string)
-    let _server_ver = dio.read_string_bypass(reader, writer)?;
-    #[cfg(debug_assertions)]
-    eprintln!("Server version: {:?}", _server_ver);
+    let server_ver = dio.read_string_bypass(reader, writer)?;
+    if verbose {
+        eprintln!("[INFO] Server version: {:?}", server_ver.as_deref().unwrap_or(""));
+    }
 
     // Dump version (string)
-    let _dump_ver = dio.read_string_bypass(reader, writer)?;
-    #[cfg(debug_assertions)]
-    eprintln!("pg_dump version string: {:?}", _dump_ver);
+    let dump_ver = dio.read_string_bypass(reader, writer)?;
+    if verbose {
+        eprintln!("[INFO] pg_dump version: {:?}", dump_ver.as_deref().unwrap_or(""));
+    }
 
     Ok(Header {
         vmaj,

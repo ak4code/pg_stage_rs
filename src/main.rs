@@ -28,6 +28,10 @@ struct Args {
     /// Regex patterns for tables to delete (can be specified multiple times)
     #[arg(long = "delete-table-pattern")]
     delete_table_patterns: Vec<String>,
+
+    /// Enable verbose output (dump version, TOC count, compression info)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() {
@@ -77,7 +81,7 @@ fn run() -> Result<()> {
             handler.process(reader, writer, peeked)?;
         }
         DumpFormat::Custom => {
-            let mut handler = CustomHandler::new(processor);
+            let mut handler = CustomHandler::new(processor).verbose(args.verbose);
             handler.process(reader, writer, peeked)?;
         }
     }

@@ -69,7 +69,11 @@ pub fn parse_toc<R: Read, W: Write>(
     let dio = DumpIO::new(header.int_size, header.offset_size);
 
     // Read TOC count
-    let toc_count = dio.read_int_bypass(reader, writer)?;
+    let toc_count = if verbose {
+        dio.read_int_bypass_debug(reader, writer, "TOC count")?
+    } else {
+        dio.read_int_bypass(reader, writer)?
+    };
     if verbose {
         eprintln!("[INFO] TOC entries: {}", toc_count);
     }

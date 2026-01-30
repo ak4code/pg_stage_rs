@@ -81,6 +81,44 @@ impl DumpIO {
         Ok(value)
     }
 
+    /// Debug version: read int and log raw bytes
+    pub fn read_int_bypass_debug<R: Read, W: Write>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        label: &str,
+    ) -> Result<i32> {
+        // Sign byte
+        let mut sign_buf = [0u8; 1];
+        reader.read_exact(&mut sign_buf)?;
+        writer.write_all(&sign_buf)?;
+        let sign = sign_buf[0];
+
+        // Magnitude bytes — stack buffer
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf[..self.int_size])?;
+        writer.write_all(&buf[..self.int_size])?;
+
+        let mut value: i32 = 0;
+        let mut shift = 0;
+        for &b in &buf[..self.int_size] {
+            value |= (b as i32) << shift;
+            shift += 8;
+        }
+
+        if sign != 0 {
+            value = -value;
+        }
+
+        // Debug output
+        eprintln!(
+            "[DEBUG] {} raw bytes: sign={:02X} magnitude={:02X?} -> value={}",
+            label, sign, &buf[..self.int_size], value
+        );
+
+        Ok(value)
+    }
+
     /// Write a signed integer as `1 byte sign + int_size bytes`.
     pub fn write_int<W: Write>(&self, writer: &mut W, val: i32) -> Result<()> {
         let (sign, v_abs) = if val < 0 {

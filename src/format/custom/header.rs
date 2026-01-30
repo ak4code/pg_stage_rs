@@ -40,6 +40,10 @@ pub fn parse_header<R: Read, W: Write>(
     initial_bytes: &[u8],
     verbose: bool,
 ) -> Result<Header> {
+    if verbose {
+        eprintln!("[DEBUG] initial_bytes ({} bytes): {:02X?}", initial_bytes.len(), initial_bytes);
+    }
+
     // Write initial bytes (the magic we already consumed for detection)
     writer.write_all(initial_bytes)?;
 
@@ -74,6 +78,7 @@ pub fn parse_header<R: Read, W: Write>(
     writer.write_all(&[vrev])?;
 
     if verbose {
+        eprintln!("[DEBUG] Version bytes: [{:02X}, {:02X}, {:02X}]", vmaj, vmin, vrev);
         eprintln!("[INFO] pg_dump format version: {}.{}.{}", vmaj, vmin, vrev);
     }
 
@@ -100,6 +105,7 @@ pub fn parse_header<R: Read, W: Write>(
     writer.write_all(&[offset_size as u8])?;
 
     if verbose {
+        eprintln!("[DEBUG] int_size={:02X}, offset_size={:02X}", int_size, offset_size);
         eprintln!("[INFO] int_size={}, offset_size={}", int_size, offset_size);
     }
 
@@ -113,6 +119,10 @@ pub fn parse_header<R: Read, W: Write>(
     // Format (should be 1 for custom)
     let format = DumpIO::read_byte(reader)?;
     writer.write_all(&[format])?;
+
+    if verbose {
+        eprintln!("[DEBUG] format byte={:02X}", format);
+    }
 
     if format != 1 {
         return Err(PgStageError::InvalidFormat(format!(
@@ -151,7 +161,11 @@ pub fn parse_header<R: Read, W: Write>(
         // 0 = no compression
         // -1 = default zlib (level 6)
         // 1-9 = zlib with that level
-        let level = dio.read_int_bypass(reader, writer)?;
+        let level = if verbose {
+            dio.read_int_bypass_debug(reader, writer, "Compression")?
+        } else {
+            dio.read_int_bypass(reader, writer)?
+        };
 
         if level == 0 {
             CompressionMethod::None
@@ -191,6 +205,10 @@ pub fn parse_header<R: Read, W: Write>(
     let dump_ver = dio.read_string_bypass(reader, writer)?;
     if verbose {
         eprintln!("[INFO] pg_dump version: {:?}", dump_ver.as_deref().unwrap_or(""));
+
+        // Debug: peek next 10 bytes to see what TOC count will read
+        // Note: this is destructive for the actual reading, so we just log the position
+        eprintln!("[DEBUG] Header parsing complete. Next bytes should be TOC count.");
     }
 
     Ok(Header {

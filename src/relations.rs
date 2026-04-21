@@ -1,17 +1,21 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use uuid::Uuid;
+use crate::FastMap;
 
 /// Tracks FK relationships to ensure consistent obfuscation across tables.
 ///
-/// Maps: table_name -> to_column_name -> fk_value -> relation_key (UUID)
-/// And:  relation_key -> obfuscated_value
+/// Layout: `by_table[table][column][fk_value] = obfuscated_value`.
+///
+/// `table` and `column` keys are `Arc<str>`, shared with `CompiledRelation` and
+/// `MutationRegistry`, so a name that appears in thousands of schemas is stored
+/// in memory exactly once per unique string.
+///
+/// `fk_value` and the stored obfuscated value are `Box<str>` (no String
+/// capacity overhead).
 #[derive(Debug, Default)]
 pub struct RelationTracker {
-    /// table_name -> column_name -> fk_value -> relation_uuid
-    fk_map: HashMap<String, HashMap<String, HashMap<String, String>>>,
-    /// relation_uuid -> obfuscated_value
-    values: HashMap<String, String>,
+    by_table: FastMap<Arc<str>, FastMap<Arc<str>, FastMap<Box<str>, Box<str>>>>,
+    count: usize,
 }
 
 impl RelationTracker {
@@ -19,36 +23,34 @@ impl RelationTracker {
         Self::default()
     }
 
-    /// Look up if a relation already has an obfuscated value.
-    /// Returns the existing obfuscated value if found.
-    pub fn lookup(
-        &self,
-        table_name: &str,
-        to_column_name: &str,
-        fk_value: &str,
-    ) -> Option<&String> {
-        self.fk_map
-            .get(table_name)
-            .and_then(|cols| cols.get(to_column_name))
-            .and_then(|fks| fks.get(fk_value))
-            .and_then(|key| self.values.get(key))
+    pub fn len(&self) -> usize {
+        self.count
     }
 
-    /// Store a new relation mapping.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn lookup(&self, table: &Arc<str>, column: &Arc<str>, fk_value: &str) -> Option<&str> {
+        self.by_table
+            .get(table.as_ref())?
+            .get(column.as_ref())?
+            .get(fk_value)
+            .map(|v| v.as_ref())
+    }
+
     pub fn store(
         &mut self,
-        table_name: &str,
-        to_column_name: &str,
+        table: &Arc<str>,
+        column: &Arc<str>,
         fk_value: &str,
-        obfuscated_value: &str,
+        obfuscated: &str,
     ) {
-        let key = Uuid::new_v4().to_string();
-        self.fk_map
-            .entry(table_name.to_string())
-            .or_default()
-            .entry(to_column_name.to_string())
-            .or_default()
-            .insert(fk_value.to_string(), key.clone());
-        self.values.insert(key, obfuscated_value.to_string());
+        let outer = self.by_table.entry(Arc::clone(table)).or_default();
+        let mid = outer.entry(Arc::clone(column)).or_default();
+        let inserted = mid.insert(Box::from(fk_value), Box::from(obfuscated));
+        if inserted.is_none() {
+            self.count += 1;
+        }
     }
 }

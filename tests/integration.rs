@@ -412,8 +412,8 @@ fn test_processor_parse_comment() {
     let mut proc = make_processor();
     let comment = "COMMENT ON COLUMN public.users.email IS 'anon: [{\"mutation_name\": \"email\", \"mutation_kwargs\": {\"unique\": true}}]';";
     assert!(proc.parse_comment(comment));
-    assert!(proc.mutation_map.contains_key("public.users"));
-    assert!(proc.mutation_map["public.users"].contains_key("email"));
+    assert!(proc.registry.mutation_map.contains_key("public.users"));
+    assert!(proc.registry.mutation_map["public.users"].contains_key("email"));
 }
 
 #[test]
@@ -421,8 +421,8 @@ fn test_processor_parse_table_comment() {
     let mut proc = make_processor();
     let comment = "COMMENT ON TABLE public.logs IS 'anon: {\"mutation_name\": \"delete\"}';";
     assert!(proc.parse_comment(comment));
-    assert!(proc.table_mutations.contains_key("public.logs"));
-    assert_eq!(proc.table_mutations["public.logs"].mutation_name, "delete");
+    assert!(proc.registry.table_mutations.contains_key("public.logs"));
+    assert_eq!(proc.registry.table_mutations["public.logs"].mutation_name, "delete");
 }
 
 #[test]

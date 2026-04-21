@@ -1,25 +1,32 @@
-use std::collections::HashSet;
-
 use crate::error::{PgStageError, Result};
+use crate::FastSet;
 
 const MAX_RETRIES: u32 = 1000;
 
 #[derive(Debug, Default)]
 pub struct UniqueTracker {
-    values: HashSet<String>,
+    values: FastSet<Box<str>>,
 }
 
 impl UniqueTracker {
     pub fn new() -> Self {
         Self {
-            values: HashSet::new(),
+            values: FastSet::new(),
         }
     }
 
-    /// Try to insert a value. Returns Ok(true) if inserted (unique),
-    /// Ok(false) if already exists.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Try to insert. Returns true if the value was new.
+    /// Avoids allocating a `String` when the value is already present.
     pub fn try_insert(&mut self, value: &str) -> bool {
-        self.values.insert(value.to_string())
+        if self.values.contains(value) {
+            return false;
+        }
+        self.values.insert(Box::from(value));
+        true
     }
 
     /// Generate a unique value using the provided generator function.

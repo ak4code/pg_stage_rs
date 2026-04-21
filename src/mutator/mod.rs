@@ -8,22 +8,31 @@ pub mod network;
 pub mod numeric;
 pub mod simple;
 
-use std::collections::HashMap;
-
 use rand::rngs::ThreadRng;
 
-use crate::error::{PgStageError, Result};
+use crate::error::Result;
 use crate::types::Locale;
 use crate::unique::UniqueTracker;
+use crate::FastMap;
+
+/// Monomorphic function pointer type used by the dispatch table.
+pub type MutationFn = fn(&mut MutationContext) -> Result<String>;
+
+/// Read-only accessor for already-obfuscated values in the current row.
+/// Used by mutations like `uuid5_by_source_value` that derive their output
+/// from another column's (already obfuscated) value.
+pub trait ObfuscatedLookup {
+    fn get(&self, column: &str) -> Option<&str>;
+}
 
 pub struct MutationContext<'a> {
-    pub kwargs: &'a HashMap<String, serde_json::Value>,
-    pub current_value: &'a str,  // Changed from String to &str to avoid allocation
+    pub kwargs: &'a FastMap<String, serde_json::Value>,
+    pub current_value: &'a str,
     pub rng: &'a mut ThreadRng,
     pub unique_tracker: &'a mut UniqueTracker,
     pub locale: Locale,
-    pub secrets: &'a HashMap<String, String>,
-    pub obfuscated_values: &'a HashMap<String, String>,
+    pub secrets: &'a FastMap<String, String>,
+    pub obfuscated_values: &'a dyn ObfuscatedLookup,
 }
 
 impl<'a> MutationContext<'a> {
@@ -39,52 +48,46 @@ impl<'a> MutationContext<'a> {
     }
 }
 
-pub fn dispatch_mutation(name: &str, ctx: &mut MutationContext) -> Result<String> {
-    match name {
-        // Names
-        "first_name" => names::first_name(ctx),
-        "last_name" => names::last_name(ctx),
-        "full_name" => names::full_name(ctx),
-        "middle_name" => names::middle_name(ctx),
+/// Resolve a mutation name to its function pointer at parse time (once).
+/// Returns `None` for unknown names — callers turn that into an error.
+pub fn resolve_mutation(name: &str) -> Option<MutationFn> {
+    Some(match name {
+        "first_name" => names::first_name,
+        "last_name" => names::last_name,
+        "full_name" => names::full_name,
+        "middle_name" => names::middle_name,
 
-        // Contact
-        "email" => contact::email(ctx),
-        "phone_number" => contact::phone_number(ctx),
-        "address" => contact::address(ctx),
-        "deterministic_phone_number" => contact::deterministic_phone(ctx),
+        "email" => contact::email,
+        "phone_number" => contact::phone_number,
+        "address" => contact::address,
+        "deterministic_phone_number" => contact::deterministic_phone,
 
-        // Numeric
-        "numeric_smallint" => numeric::smallint(ctx),
-        "numeric_integer" => numeric::integer(ctx),
-        "numeric_bigint" => numeric::bigint(ctx),
-        "numeric_decimal" => numeric::decimal(ctx),
-        "numeric_real" => numeric::real(ctx),
-        "numeric_double_precision" => numeric::double_precision(ctx),
-        "numeric_smallserial" => numeric::smallserial(ctx),
-        "numeric_serial" => numeric::serial(ctx),
-        "numeric_bigserial" => numeric::bigserial(ctx),
+        "numeric_smallint" => numeric::smallint,
+        "numeric_integer" => numeric::integer,
+        "numeric_bigint" => numeric::bigint,
+        "numeric_decimal" => numeric::decimal,
+        "numeric_real" => numeric::real,
+        "numeric_double_precision" => numeric::double_precision,
+        "numeric_smallserial" => numeric::smallserial,
+        "numeric_serial" => numeric::serial,
+        "numeric_bigserial" => numeric::bigserial,
 
-        // DateTime
-        "date" => datetime::date(ctx),
+        "date" => datetime::date,
 
-        // Network
-        "uri" => network::uri(ctx),
-        "ipv4" => network::ipv4(ctx),
-        "ipv6" => network::ipv6(ctx),
+        "uri" => network::uri,
+        "ipv4" => network::ipv4,
+        "ipv6" => network::ipv6,
 
-        // Identity
-        "uuid4" => identity::uuid4(ctx),
-        "uuid5_by_source_value" => identity::uuid5_by_source_value(ctx),
+        "uuid4" => identity::uuid4,
+        "uuid5_by_source_value" => identity::uuid5_by_source_value,
 
-        // Simple
-        "null" => simple::null(ctx),
-        "empty_string" => simple::empty_string(ctx),
-        "fixed_value" => simple::fixed_value(ctx),
-        "random_choice" => simple::random_choice(ctx),
+        "null" => simple::null,
+        "empty_string" => simple::empty_string,
+        "fixed_value" => simple::fixed_value,
+        "random_choice" => simple::random_choice,
 
-        // Mask
-        "string_by_mask" => mask::string_by_mask(ctx),
+        "string_by_mask" => mask::string_by_mask,
 
-        _ => Err(PgStageError::UnknownMutation(name.to_string())),
-    }
+        _ => return None,
+    })
 }

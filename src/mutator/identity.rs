@@ -23,13 +23,7 @@ pub fn uuid5_by_source_value(ctx: &mut MutationContext) -> Result<String> {
         PgStageError::InvalidParameter(format!("Invalid UUID namespace '{}': {}", namespace_str, e))
     })?;
 
-    // Get source value from obfuscated_values
-    let source_value = ctx
-        .obfuscated_values
-        .get(source_column)
-        .cloned()
-        .unwrap_or_default();
-
+    let source_value = ctx.obfuscated_values.get(source_column).unwrap_or("");
     let today = Utc::now().format("%Y-%m-%d").to_string();
     let name = format!("{}-{}", source_value, today);
     let uuid5 = Uuid::new_v5(&namespace, name.as_bytes());

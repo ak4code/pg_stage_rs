@@ -12,10 +12,10 @@ use crate::format::custom::header::CompressionMethod;
 use crate::format::custom::io::DumpIO;
 use crate::processor::DataProcessor;
 
-const OUTPUT_CHUNK_SIZE: usize = 1024 * 1024; // 1MB for better throughput
-const MAX_CHUNK_SIZE: usize = 50 * 1024 * 1024; // 50MB
-const READ_BUF_SIZE: usize = 2 * 1024 * 1024; // 2MB read buffer
-const COALESCE_TARGET: usize = 256 * 1024; // Accumulate at least 256KB before returning
+const OUTPUT_CHUNK_SIZE: usize = 1024 * 1024;
+const MAX_CHUNK_SIZE: usize = 50 * 1024 * 1024;
+const READ_BUF_SIZE: usize = 2 * 1024 * 1024;
+const COALESCE_TARGET: usize = 256 * 1024;
 
 /// Streaming reader that coalesces many small chunks into larger reads.
 /// Critical for -Z0 dumps which can have millions of tiny (~100 byte) chunks.
@@ -38,24 +38,25 @@ impl<'a, R: Read> ChunkReader<'a, R> {
         }
     }
 
-    /// Read multiple chunks until we have at least COALESCE_TARGET bytes or hit end
     fn fill_buffer(&mut self) -> io::Result<()> {
-        // Move remaining data to front
+        // Compact the buffer in-place: move unread bytes to the front once,
+        // rather than calling drain (which does the same thing + bookkeeping).
         if self.buf_pos > 0 {
-            self.buffer.drain(..self.buf_pos);
+            let len = self.buffer.len();
+            self.buffer.copy_within(self.buf_pos..len, 0);
+            self.buffer.truncate(len - self.buf_pos);
             self.buf_pos = 0;
         }
 
-        // Read chunks until we have enough data
         while self.buffer.len() < COALESCE_TARGET {
-            let chunk_len = self.dio.read_int(self.reader)
+            let chunk_len = self
+                .dio
+                .read_int(self.reader)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
             if chunk_len == 0 {
                 self.done = true;
                 break;
             }
-
             let len = chunk_len.unsigned_abs() as usize;
             if len > MAX_CHUNK_SIZE {
                 return Err(io::Error::new(
@@ -63,20 +64,16 @@ impl<'a, R: Read> ChunkReader<'a, R> {
                     format!("Chunk size {} exceeds maximum {}", len, MAX_CHUNK_SIZE),
                 ));
             }
-
-            // Read directly into buffer
             let start = self.buffer.len();
             self.buffer.resize(start + len, 0);
             self.reader.read_exact(&mut self.buffer[start..])?;
         }
-
         Ok(())
     }
 }
 
 impl<R: Read> Read for ChunkReader<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Refill if buffer is exhausted or low
         if self.buf_pos >= self.buffer.len() {
             if self.done {
                 return Ok(0);
@@ -86,8 +83,6 @@ impl<R: Read> Read for ChunkReader<'_, R> {
                 return Ok(0);
             }
         }
-
-        // Copy from internal buffer to output
         let available = self.buffer.len() - self.buf_pos;
         let to_copy = available.min(buf.len());
         buf[..to_copy].copy_from_slice(&self.buffer[self.buf_pos..self.buf_pos + to_copy]);
@@ -96,11 +91,12 @@ impl<R: Read> Read for ChunkReader<'_, R> {
     }
 }
 
-/// Processes data blocks in a custom format dump.
 pub struct BlockProcessor<'a> {
     dio: &'a DumpIO,
     compression: CompressionMethod,
     processor: &'a mut DataProcessor,
+    zstd_level: i32,
+    zstd_threads: u32,
 }
 
 impl<'a> BlockProcessor<'a> {
@@ -108,15 +104,18 @@ impl<'a> BlockProcessor<'a> {
         dio: &'a DumpIO,
         compression: CompressionMethod,
         processor: &'a mut DataProcessor,
+        zstd_level: i32,
+        zstd_threads: u32,
     ) -> Self {
         Self {
             dio,
             compression,
             processor,
+            zstd_level,
+            zstd_threads,
         }
     }
 
-    /// Process a data block: read chunks, decompress if needed, mutate, compress, write.
     pub fn process_block<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
@@ -131,14 +130,11 @@ impl<'a> BlockProcessor<'a> {
         }
     }
 
-    /// Pass through a block without mutation.
-    /// Optimized to coalesce many small chunks into larger output chunks.
     pub fn pass_through_block<R: Read, W: Write>(
         &self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        // Use ChunkReader to efficiently read many small chunks
         let mut chunk_reader = ChunkReader::new(reader, self.dio);
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
         let mut output_buf: Vec<u8> = Vec::with_capacity(OUTPUT_CHUNK_SIZE * 2);
@@ -148,10 +144,7 @@ impl<'a> BlockProcessor<'a> {
             if n == 0 {
                 break;
             }
-
             output_buf.extend_from_slice(&read_buf[..n]);
-
-            // Flush when buffer is large enough
             if output_buf.len() >= OUTPUT_CHUNK_SIZE {
                 for chunk in output_buf.chunks(OUTPUT_CHUNK_SIZE) {
                     self.dio.write_int(writer, chunk.len() as i32)?;
@@ -161,150 +154,128 @@ impl<'a> BlockProcessor<'a> {
             }
         }
 
-        // Write remaining data
         if !output_buf.is_empty() {
             self.dio.write_int(writer, output_buf.len() as i32)?;
             writer.write_all(&output_buf)?;
         }
 
-        // Terminator
         self.dio.write_int(writer, 0)?;
         Ok(())
     }
 
-    /// Streaming processing for uncompressed blocks.
-    /// Uses ChunkReader to buffer small chunks efficiently (critical for -Z0 dumps
-    /// which can have millions of tiny chunks).
     fn process_block_uncompressed<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        // Use ChunkReader to efficiently buffer many small chunks into large reads
         let mut chunk_reader = ChunkReader::new(reader, self.dio);
-
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
-        let mut line_tail: Vec<u8> = Vec::new();
+        // Reused tail buffer: one allocation per block instead of one per chunk.
+        let mut line_tail: Vec<u8> = Vec::with_capacity(64 * 1024);
         let mut output_buf: Vec<u8> = Vec::with_capacity(OUTPUT_CHUNK_SIZE * 2);
 
         loop {
-            // Read large buffer from ChunkReader (it handles chunk boundaries internally)
             let n = chunk_reader.read(&mut read_buf)?;
             if n == 0 {
                 break;
             }
-
-            // Combine with leftover from previous iteration
-            let data = if line_tail.is_empty() {
+            let data_slice: &[u8] = if line_tail.is_empty() {
                 &read_buf[..n]
             } else {
                 line_tail.extend_from_slice(&read_buf[..n]);
                 line_tail.as_slice()
             };
 
-            // Split into complete lines + tail
-            match memrchr(b'\n', data) {
+            match memrchr(b'\n', data_slice) {
                 Some(last_nl) => {
-                    let complete = &data[..=last_nl];
-                    let tail = &data[last_nl + 1..];
+                    let complete_len = last_nl + 1;
+                    let (complete, tail) = data_slice.split_at(complete_len);
+                    let tail = tail.to_vec();
+                    process_complete_lines(self.processor, complete, &mut output_buf);
+                    line_tail.clear();
+                    line_tail.extend_from_slice(&tail);
 
-                    self.process_complete_lines(complete, &mut output_buf);
-                    line_tail = tail.to_vec();
-
-                    // Flush output when large enough
                     if output_buf.len() >= OUTPUT_CHUNK_SIZE {
-                        self.flush_uncompressed(writer, &mut output_buf)?;
+                        flush_uncompressed(self.dio, writer, &mut output_buf)?;
                     }
                 }
                 None => {
                     if line_tail.is_empty() {
-                        line_tail = read_buf[..n].to_vec();
+                        line_tail.extend_from_slice(&read_buf[..n]);
                     }
-                    // else: data already IS line_tail (extended above), keep as-is
+                    // else: line_tail already extended above, leave as-is.
                 }
             }
         }
 
-        // Process remaining tail (last line without newline)
         if !line_tail.is_empty() {
             if let Some(mutated) = self.processor.process_line(&line_tail) {
-                output_buf.extend_from_slice(&mutated);
+                output_buf.extend_from_slice(mutated);
             }
         }
 
-        // Write remaining output
         if !output_buf.is_empty() {
-            self.flush_uncompressed(writer, &mut output_buf)?;
+            flush_uncompressed(self.dio, writer, &mut output_buf)?;
         }
 
-        // Terminator
         self.dio.write_int(writer, 0)?;
         Ok(())
     }
 
-    /// Streaming processing for zlib-compressed blocks.
-    /// Uses ChunkReader for on-demand chunk reading to minimize memory usage.
     fn process_block_zlib<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        // Use streaming chunk reader instead of loading entire block into memory
         let chunk_reader = ChunkReader::new(reader, self.dio);
-
-        // Stream: decompress → process lines → compress → write chunks
         let mut decoder = ZlibDecoder::new(chunk_reader);
-        let mut encoder = ZlibEncoder::new(Vec::with_capacity(OUTPUT_CHUNK_SIZE), Compression::new(6));
+        let mut encoder =
+            ZlibEncoder::new(Vec::with_capacity(OUTPUT_CHUNK_SIZE), Compression::new(6));
 
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
-        let mut line_tail: Vec<u8> = Vec::new();
+        let mut line_tail: Vec<u8> = Vec::with_capacity(64 * 1024);
 
         loop {
-            let n = decoder.read(&mut read_buf)
+            let n = decoder
+                .read(&mut read_buf)
                 .map_err(|e| PgStageError::CompressionError(format!("Zlib decompression failed: {}", e)))?;
             if n == 0 {
                 break;
             }
-
-            let data = if line_tail.is_empty() {
+            let data_slice: &[u8] = if line_tail.is_empty() {
                 &read_buf[..n]
             } else {
                 line_tail.extend_from_slice(&read_buf[..n]);
                 line_tail.as_slice()
             };
-
-            match memrchr(b'\n', data) {
+            match memrchr(b'\n', data_slice) {
                 Some(last_nl) => {
-                    let complete = &data[..=last_nl];
-                    let tail = &data[last_nl + 1..];
-
-                    // Process complete lines directly into encoder
-                    self.process_complete_lines_to_writer(complete, &mut encoder)?;
-
-                    line_tail = tail.to_vec();
-
-                    // Flush compressed output when large enough
-                    self.flush_encoder_chunks(writer, &mut encoder)?;
+                    let complete_len = last_nl + 1;
+                    let (complete, tail) = data_slice.split_at(complete_len);
+                    let tail = tail.to_vec();
+                    process_complete_lines_to_writer(self.processor, complete, &mut encoder)?;
+                    line_tail.clear();
+                    line_tail.extend_from_slice(&tail);
+                    flush_encoder_chunks(self.dio, writer, encoder.get_mut())?;
                 }
                 None => {
                     if line_tail.is_empty() {
-                        line_tail = read_buf[..n].to_vec();
+                        line_tail.extend_from_slice(&read_buf[..n]);
                     }
-                    // else: data already IS line_tail (extended above), keep as-is
                 }
             }
         }
 
-        // Process remaining tail
         if !line_tail.is_empty() {
             if let Some(mutated) = self.processor.process_line(&line_tail) {
-                encoder.write_all(&mutated)
+                encoder
+                    .write_all(mutated)
                     .map_err(|e| PgStageError::CompressionError(format!("Zlib compression failed: {}", e)))?;
             }
         }
 
-        // Finalize encoder and write remaining compressed data
-        let remaining = encoder.finish()
+        let remaining = encoder
+            .finish()
             .map_err(|e| PgStageError::CompressionError(format!("Zlib compression finish failed: {}", e)))?;
         if !remaining.is_empty() {
             for chunk in remaining.chunks(OUTPUT_CHUNK_SIZE) {
@@ -312,83 +283,68 @@ impl<'a> BlockProcessor<'a> {
                 writer.write_all(chunk)?;
             }
         }
-
-        // Terminator
         self.dio.write_int(writer, 0)?;
         Ok(())
     }
 
-    /// Streaming processing for zstd-compressed blocks.
-    /// Uses ChunkReader for on-demand chunk reading to minimize memory usage.
     fn process_block_zstd<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> Result<()> {
-        // Use streaming chunk reader instead of loading entire block into memory
         let chunk_reader = ChunkReader::new(reader, self.dio);
-
-        // Stream: decompress → process lines → compress → write chunks
-        // Use compression level 1 for speed (was 3)
         let mut decoder = ZstdDecoder::new(chunk_reader)
             .map_err(|e| PgStageError::CompressionError(format!("Zstd decoder init failed: {}", e)))?;
-
-        // Use multithread zstd compression for better performance on large data
-        let mut encoder = ZstdEncoder::new(Vec::with_capacity(OUTPUT_CHUNK_SIZE), 1)
+        let mut encoder = ZstdEncoder::new(Vec::with_capacity(OUTPUT_CHUNK_SIZE), self.zstd_level)
             .map_err(|e| PgStageError::CompressionError(format!("Zstd encoder init failed: {}", e)))?;
-        // Enable multithreaded compression (0 = auto-detect CPU count)
-        encoder.multithread(0)
+        encoder
+            .multithread(self.zstd_threads)
             .map_err(|e| PgStageError::CompressionError(format!("Zstd multithread init failed: {}", e)))?;
 
         let mut read_buf = vec![0u8; READ_BUF_SIZE];
-        let mut line_tail: Vec<u8> = Vec::new();
+        let mut line_tail: Vec<u8> = Vec::with_capacity(64 * 1024);
 
         loop {
-            let n = decoder.read(&mut read_buf)
+            let n = decoder
+                .read(&mut read_buf)
                 .map_err(|e| PgStageError::CompressionError(format!("Zstd decompression failed: {}", e)))?;
             if n == 0 {
                 break;
             }
-
-            let data = if line_tail.is_empty() {
+            let data_slice: &[u8] = if line_tail.is_empty() {
                 &read_buf[..n]
             } else {
                 line_tail.extend_from_slice(&read_buf[..n]);
                 line_tail.as_slice()
             };
-
-            match memrchr(b'\n', data) {
+            match memrchr(b'\n', data_slice) {
                 Some(last_nl) => {
-                    let complete = &data[..=last_nl];
-                    let tail = &data[last_nl + 1..];
-
-                    // Process complete lines directly into encoder
-                    self.process_complete_lines_to_writer(complete, &mut encoder)?;
-
-                    line_tail = tail.to_vec();
-
-                    // Flush compressed output when large enough
-                    self.flush_zstd_encoder_chunks(writer, &mut encoder)?;
+                    let complete_len = last_nl + 1;
+                    let (complete, tail) = data_slice.split_at(complete_len);
+                    let tail = tail.to_vec();
+                    process_complete_lines_to_writer(self.processor, complete, &mut encoder)?;
+                    line_tail.clear();
+                    line_tail.extend_from_slice(&tail);
+                    flush_encoder_chunks_zstd(self.dio, writer, encoder.get_mut())?;
                 }
                 None => {
                     if line_tail.is_empty() {
-                        line_tail = read_buf[..n].to_vec();
+                        line_tail.extend_from_slice(&read_buf[..n]);
                     }
-                    // else: data already IS line_tail (extended above), keep as-is
                 }
             }
         }
 
-        // Process remaining tail
         if !line_tail.is_empty() {
             if let Some(mutated) = self.processor.process_line(&line_tail) {
-                encoder.write_all(&mutated)
+                encoder
+                    .write_all(mutated)
                     .map_err(|e| PgStageError::CompressionError(format!("Zstd compression failed: {}", e)))?;
             }
         }
 
-        // Finalize encoder and write remaining compressed data
-        let remaining = encoder.finish()
+        let remaining = encoder
+            .finish()
             .map_err(|e| PgStageError::CompressionError(format!("Zstd compression finish failed: {}", e)))?;
         if !remaining.is_empty() {
             for chunk in remaining.chunks(OUTPUT_CHUNK_SIZE) {
@@ -396,115 +352,111 @@ impl<'a> BlockProcessor<'a> {
                 writer.write_all(chunk)?;
             }
         }
-
-        // Terminator
         self.dio.write_int(writer, 0)?;
         Ok(())
     }
+}
 
-    /// Process complete lines (each ending with \n) and append results to output buffer.
-    fn process_complete_lines(&mut self, data: &[u8], output: &mut Vec<u8>) {
-        // Fast path: if table is being deleted, skip all data
-        if self.processor.is_delete() {
-            return;
-        }
-
-        // Fast path: if no mutations, copy data directly
-        if !self.processor.has_mutations() {
-            output.extend_from_slice(data);
-            return;
-        }
-
-        // Slow path: process line by line
-        use memchr::memchr;
-        let mut start = 0;
-        while start < data.len() {
-            let end = memchr(b'\n', &data[start..])
-                .map(|p| start + p)
-                .unwrap_or(data.len());
-
-            let line = &data[start..end];
-            if let Some(mutated) = self.processor.process_line(line) {
-                output.extend_from_slice(&mutated);
-                if end < data.len() {
-                    output.push(b'\n');
-                }
-            }
-
-            start = end + 1;
-        }
+fn process_complete_lines(processor: &mut DataProcessor, data: &[u8], output: &mut Vec<u8>) {
+    if processor.is_delete() {
+        return;
     }
-
-    /// Process complete lines and write results to a Write impl (encoder).
-    fn process_complete_lines_to_writer<W: Write>(&mut self, data: &[u8], writer: &mut W) -> Result<()> {
-        // Fast path: if table is being deleted, skip all data
-        if self.processor.is_delete() {
-            return Ok(());
+    if !processor.has_mutations() {
+        output.extend_from_slice(data);
+        return;
+    }
+    use memchr::memchr;
+    let mut start = 0;
+    while start < data.len() {
+        let end = memchr(b'\n', &data[start..])
+            .map(|p| start + p)
+            .unwrap_or(data.len());
+        let line = &data[start..end];
+        if let Some(mutated) = processor.process_line(line) {
+            output.extend_from_slice(mutated);
+            if end < data.len() {
+                output.push(b'\n');
+            }
         }
+        start = end + 1;
+    }
+}
 
-        // Fast path: if no mutations, write data directly
-        if !self.processor.has_mutations() {
-            writer.write_all(data)
+fn process_complete_lines_to_writer<W: Write>(
+    processor: &mut DataProcessor,
+    data: &[u8],
+    writer: &mut W,
+) -> Result<()> {
+    if processor.is_delete() {
+        return Ok(());
+    }
+    if !processor.has_mutations() {
+        writer
+            .write_all(data)
+            .map_err(|e| PgStageError::CompressionError(format!("Write failed: {}", e)))?;
+        return Ok(());
+    }
+    use memchr::memchr;
+    let mut start = 0;
+    while start < data.len() {
+        let end = memchr(b'\n', &data[start..])
+            .map(|p| start + p)
+            .unwrap_or(data.len());
+        let line = &data[start..end];
+        if let Some(mutated) = processor.process_line(line) {
+            writer
+                .write_all(mutated)
                 .map_err(|e| PgStageError::CompressionError(format!("Write failed: {}", e)))?;
-            return Ok(());
-        }
-
-        // Slow path: process line by line
-        use memchr::memchr;
-        let mut start = 0;
-        while start < data.len() {
-            let end = memchr(b'\n', &data[start..])
-                .map(|p| start + p)
-                .unwrap_or(data.len());
-
-            let line = &data[start..end];
-            if let Some(mutated) = self.processor.process_line(line) {
-                writer.write_all(&mutated)
+            if end < data.len() {
+                writer
+                    .write_all(b"\n")
                     .map_err(|e| PgStageError::CompressionError(format!("Write failed: {}", e)))?;
-                if end < data.len() {
-                    writer.write_all(b"\n")
-                        .map_err(|e| PgStageError::CompressionError(format!("Write failed: {}", e)))?;
-                }
             }
-
-            start = end + 1;
         }
-        Ok(())
+        start = end + 1;
     }
+    Ok(())
+}
 
-    /// Write all data in output_buf as uncompressed chunks and clear the buffer.
-    fn flush_uncompressed<W: Write>(&self, writer: &mut W, output_buf: &mut Vec<u8>) -> Result<()> {
-        for chunk in output_buf.chunks(OUTPUT_CHUNK_SIZE) {
-            self.dio.write_int(writer, chunk.len() as i32)?;
+fn flush_uncompressed<W: Write>(
+    dio: &DumpIO,
+    writer: &mut W,
+    output_buf: &mut Vec<u8>,
+) -> Result<()> {
+    for chunk in output_buf.chunks(OUTPUT_CHUNK_SIZE) {
+        dio.write_int(writer, chunk.len() as i32)?;
+        writer.write_all(chunk)?;
+    }
+    output_buf.clear();
+    Ok(())
+}
+
+fn flush_encoder_chunks<W: Write>(
+    dio: &DumpIO,
+    writer: &mut W,
+    inner: &mut Vec<u8>,
+) -> Result<()> {
+    if inner.len() >= OUTPUT_CHUNK_SIZE {
+        for chunk in inner.chunks(OUTPUT_CHUNK_SIZE) {
+            dio.write_int(writer, chunk.len() as i32)?;
             writer.write_all(chunk)?;
         }
-        output_buf.clear();
-        Ok(())
+        inner.clear();
     }
+    Ok(())
+}
 
-    /// Flush accumulated compressed bytes from zlib encoder's inner buffer as chunks.
-    fn flush_encoder_chunks<W: Write>(&self, writer: &mut W, encoder: &mut ZlibEncoder<Vec<u8>>) -> Result<()> {
-        let inner = encoder.get_mut();
-        if inner.len() >= OUTPUT_CHUNK_SIZE {
-            for chunk in inner.chunks(OUTPUT_CHUNK_SIZE) {
-                self.dio.write_int(writer, chunk.len() as i32)?;
-                writer.write_all(chunk)?;
-            }
-            inner.clear();
+fn flush_encoder_chunks_zstd<W: Write>(
+    dio: &DumpIO,
+    writer: &mut W,
+    inner: &mut Vec<u8>,
+) -> Result<()> {
+    if inner.len() >= OUTPUT_CHUNK_SIZE {
+        for chunk in inner.chunks(OUTPUT_CHUNK_SIZE) {
+            dio.write_int(writer, chunk.len() as i32)?;
+            writer.write_all(chunk)?;
         }
-        Ok(())
+        inner.clear();
     }
-
-    /// Flush accumulated compressed bytes from zstd encoder's inner buffer as chunks.
-    fn flush_zstd_encoder_chunks<W: Write>(&self, writer: &mut W, encoder: &mut ZstdEncoder<'_, Vec<u8>>) -> Result<()> {
-        let inner = encoder.get_mut();
-        if inner.len() >= OUTPUT_CHUNK_SIZE {
-            for chunk in inner.chunks(OUTPUT_CHUNK_SIZE) {
-                self.dio.write_int(writer, chunk.len() as i32)?;
-                writer.write_all(chunk)?;
-            }
-            inner.clear();
-        }
-        Ok(())
-    }
+    Ok(())
 }

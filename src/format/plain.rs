@@ -21,12 +21,10 @@ impl PlainHandler {
         writer: W,
         initial_bytes: &[u8],
     ) -> Result<()> {
-        // Large buffers for better throughput (2MB each)
         let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, writer);
         let mut is_data = false;
         let mut comment_buf: Option<String> = None;
 
-        // If we have initial bytes, chain them with the reader
         let combined = std::io::Cursor::new(initial_bytes.to_vec()).chain(reader);
         let buf_reader = BufReader::with_capacity(2 * 1024 * 1024, combined);
 
@@ -35,7 +33,6 @@ impl PlainHandler {
 
             if is_data {
                 if line == "\\." {
-                    // End of COPY data
                     if !self.processor.is_delete() {
                         writer.write_all(b"\\.\n")?;
                     }
@@ -44,20 +41,18 @@ impl PlainHandler {
                     continue;
                 }
 
-                // Process data line
                 if let Some(mutated) = self.processor.process_line(line.as_bytes()) {
-                    writer.write_all(&mutated)?;
+                    writer.write_all(mutated)?;
                     writer.write_all(b"\n")?;
                 }
                 continue;
             }
 
-            // Handle multiline COMMENT accumulation
             if let Some(ref mut buf) = comment_buf {
                 buf.push('\n');
                 buf.push_str(&line);
                 if line.ends_with("';") {
-                    let full_comment = buf.clone();
+                    let full_comment = std::mem::take(buf);
                     comment_buf = None;
                     self.processor.parse_comment(&full_comment);
                     writer.write_all(full_comment.as_bytes())?;
@@ -66,7 +61,6 @@ impl PlainHandler {
                 continue;
             }
 
-            // Detect start of a multiline COMMENT ON COLUMN/TABLE with 'anon:
             if (line.starts_with("COMMENT ON COLUMN ") || line.starts_with("COMMENT ON TABLE "))
                 && line.contains("'anon: ")
                 && !line.ends_with("';")
@@ -75,10 +69,8 @@ impl PlainHandler {
                 continue;
             }
 
-            // Try to parse as single-line comment
             self.processor.parse_comment(&line);
 
-            // Try to parse as COPY statement
             if self.processor.setup_table(&line) {
                 if !self.processor.is_delete() {
                     writer.write_all(line.as_bytes())?;
@@ -88,12 +80,12 @@ impl PlainHandler {
                 continue;
             }
 
-            // Pass through other lines unchanged
             writer.write_all(line.as_bytes())?;
             writer.write_all(b"\n")?;
         }
 
         writer.flush()?;
+        self.processor.emit_summary();
         Ok(())
     }
 }

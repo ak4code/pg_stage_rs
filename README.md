@@ -206,6 +206,24 @@ COMMENT ON TABLE public.audit_log IS 'anon: {"mutation_name": "delete"}';
 |----------|-----------|-------------|
 | `string_by_mask` | `mask`, `char`, `digit`, `unique` | Template: `@`=letter, `#`=digit |
 
+### JSON
+
+| Mutation | Parameters | Description |
+|----------|-----------|-------------|
+| `json_update` | map of `key → nested mutation spec` | Partially updates a JSON object column. Each value is `{"mutation_name": ..., "mutation_kwargs": ...}`. `mutation_name: "delete"` clears the value (sets it to `""`) — the key stays. Missing keys are skipped — the mutation is not applied and the key is not added. Nested mutation output is inserted as a JSON string (or `null` when it returns `\N`). |
+
+Example:
+
+```sql
+COMMENT ON COLUMN public.users.meta IS 'anon: [{
+    "mutation_name": "json_update",
+    "mutation_kwargs": {
+        "name":   {"mutation_name": "first_name"},
+        "secret": {"mutation_name": "delete"}
+    }
+}]';
+```
+
 ## Condition Operations
 
 | Operation | Description |

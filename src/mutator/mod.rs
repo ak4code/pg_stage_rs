@@ -1,6 +1,7 @@
 pub mod contact;
 pub mod datetime;
 pub mod identity;
+pub mod json_update;
 pub mod locale;
 pub mod mask;
 pub mod names;
@@ -87,6 +88,8 @@ pub fn resolve_mutation(name: &str) -> Option<MutationFn> {
         "random_choice" => simple::random_choice,
 
         "string_by_mask" => mask::string_by_mask,
+
+        "json_update" => json_update::json_update,
 
         _ => return None,
     })

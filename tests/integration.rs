@@ -448,3 +448,111 @@ fn test_delete_table_pattern() {
     assert!(!result.contains("log entry"));
     assert!(!result.contains("COPY public.audit_log"));
 }
+
+fn run_json_update(rules_json: &str, row_json: &str) -> String {
+    let input = format!(
+        "COMMENT ON COLUMN public.users.meta IS 'anon: [{}]';\nCOPY public.users (id, meta) FROM stdin;\n1\t{}\n\\.\n",
+        rules_json, row_json,
+    );
+    let mut output = Vec::new();
+    let mut handler = PlainHandler::new(make_processor());
+    handler.process(Cursor::new(b""), &mut output, input.as_bytes()).unwrap();
+    let result = String::from_utf8(output).unwrap();
+    let data_line = result
+        .lines()
+        .find(|l| l.starts_with("1\t"))
+        .expect("data row not found in output");
+    data_line.splitn(2, '\t').nth(1).unwrap().to_string()
+}
+
+#[test]
+fn test_plain_mutation_json_update_replace_key() {
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"key2": {"mutation_name": "fixed_value", "mutation_kwargs": {"value": "REPLACED"}}}}"#,
+        r#"{"key1":"foo","key2":"bar","key3":123}"#,
+    );
+    assert!(meta.contains(r#""key1":"foo""#), "got: {}", meta);
+    assert!(meta.contains(r#""key2":"REPLACED""#), "got: {}", meta);
+    assert!(meta.contains(r#""key3":123"#), "got: {}", meta);
+    assert!(!meta.contains(r#""bar""#), "got: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_delete_clears_value_keeps_key() {
+    // "delete" on an existing key sets its value to "" but keeps the key.
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"key1": {"mutation_name": "delete"}, "key3": {"mutation_name": "delete"}}}"#,
+        r#"{"key1":"foo","key2":"bar","key3":123}"#,
+    );
+    assert!(meta.contains(r#""key1":"""#), "got: {}", meta);
+    assert!(meta.contains(r#""key2":"bar""#), "got: {}", meta);
+    assert!(meta.contains(r#""key3":"""#), "got: {}", meta);
+    assert!(!meta.contains(r#""foo""#), "got: {}", meta);
+    assert!(!meta.contains(r#"123"#), "got: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_missing_key_normal_skipped() {
+    // Normal mutation on a missing key is skipped — the key is NOT added.
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"new_key": {"mutation_name": "fixed_value", "mutation_kwargs": {"value": "NEW"}}}}"#,
+        r#"{"key1":"foo"}"#,
+    );
+    assert!(meta.contains(r#""key1":"foo""#), "got: {}", meta);
+    assert!(!meta.contains("new_key"), "got: {}", meta);
+    assert!(!meta.contains(r#""NEW""#), "got: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_missing_key_delete_is_noop() {
+    // "delete" on a missing key is a no-op — the key is NOT added.
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"absent": {"mutation_name": "delete"}}}"#,
+        r#"{"key1":"foo"}"#,
+    );
+    assert!(meta.contains(r#""key1":"foo""#), "got: {}", meta);
+    assert!(!meta.contains("absent"), "got: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_nested_first_name_preserves_untouched_keys() {
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"name": {"mutation_name": "first_name"}}}"#,
+        r#"{"name":"OriginalName","age":30}"#,
+    );
+    assert!(!meta.contains("OriginalName"), "got: {}", meta);
+    // age unchanged (still numeric), name replaced with some non-empty string
+    assert!(meta.contains(r#""age":30"#), "got: {}", meta);
+    assert!(meta.contains(r#""name":""#), "got: {}", meta);
+    assert!(!meta.contains(r#""name":"""#), "name should not be empty: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_mixed_replace_delete_and_missing() {
+    // "keep" exists → replaced; "clear" exists → cleared; "absent" missing → skipped.
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {
+            "keep": {"mutation_name": "fixed_value", "mutation_kwargs": {"value": "X"}},
+            "clear": {"mutation_name": "delete"},
+            "absent": {"mutation_name": "fixed_value", "mutation_kwargs": {"value": "Y"}}
+        }}"#,
+        r#"{"keep":"old","clear":"data","other":42}"#,
+    );
+    assert!(meta.contains(r#""keep":"X""#), "got: {}", meta);
+    assert!(meta.contains(r#""clear":"""#), "got: {}", meta);
+    assert!(meta.contains(r#""other":42"#), "got: {}", meta);
+    assert!(!meta.contains("absent"), "got: {}", meta);
+    assert!(!meta.contains(r#""Y""#), "got: {}", meta);
+    assert!(!meta.contains(r#""old""#), "got: {}", meta);
+    assert!(!meta.contains(r#""data""#), "got: {}", meta);
+}
+
+#[test]
+fn test_plain_mutation_json_update_empty_object_skips_all() {
+    // Nothing to mutate — missing keys are skipped, object stays empty.
+    let meta = run_json_update(
+        r#"{"mutation_name": "json_update", "mutation_kwargs": {"anything": {"mutation_name": "fixed_value", "mutation_kwargs": {"value": "hello"}}}}"#,
+        r#"{}"#,
+    );
+    assert_eq!(meta, "{}", "got: {}", meta);
+}

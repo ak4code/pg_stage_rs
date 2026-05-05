@@ -63,8 +63,12 @@ pg_dump -Fc mydb | pg_stage_rs --verbose > anonymized.dump
 | `-l, --locale` | `en` | Locale for generated data (`en`, `ru`) |
 | `-d, --delimiter` | `\t` | Column delimiter character |
 | `-f, --format` | auto | Force format: `plain`/`p`, `custom`/`c` |
-| `-v, --verbose` | off | Show dump info: format version, compression, TOC count |
+| `-v, --verbose` | off | Show dump info: format version, compression, TOC count, parse warnings |
 | `--delete-table-pattern` | -- | Regex pattern for tables to remove (repeatable) |
+| `--rules-file` | -- | Path to JSON file with regex-based pattern rules (see "Pattern Rules File") |
+| `--zstd-level` | `1` | Zstd compression level for output dump (1-22) |
+| `--zstd-threads` | `0` | Zstd compression threads (0 = auto-detect CPU count) |
+| `--strict` | off | Fail-fast prefix (`error:` instead of `warning:`) for invalid `anon:` JSON in COMMENTs |
 
 ## Defining Mutations
 
@@ -134,6 +138,69 @@ COMMENT ON COLUMN public.orders.customer_email IS 'anon: [
 
 ```sql
 COMMENT ON TABLE public.audit_log IS 'anon: {"mutation_name": "delete"}';
+```
+
+## Pattern Rules File (`--rules-file`)
+
+Alternative to `COMMENT ON COLUMN/TABLE`: a JSON file with regex-based rules. Useful when you can't (or don't want to) modify the source schema, or when the same rules should apply to multiple databases.
+
+Rules file format:
+
+```json
+{
+  "table_patterns": [
+    { "table": "<regex on schema.table>", "mutation": { "mutation_name": "delete" } }
+  ],
+  "column_patterns": [
+    {
+      "table":  "<regex on schema.table>",
+      "column": "<regex on column name>",
+      "mutations": [ /* same MutationSpec array as in COMMENT */ ]
+    }
+  ]
+}
+```
+
+- `table_patterns` — table-level rules. Currently only `delete` is meaningful (equivalent to `--delete-table-pattern`, just expressed in JSON).
+- `column_patterns` — same `MutationSpec` shape as in `COMMENT ON COLUMN`, attached to columns whose `schema.table` and column name both match the given regexes. Rules from the file **add to** any rules already declared via COMMENT — they do not override them.
+
+The full name compared is always `schema.table` (with schema prefix). Anchor your regexes (`^...$`) — bare `users` will also match `users_archive`.
+
+Errors in the rules file (invalid JSON, bad regex, unknown mutation name) abort the run regardless of `--strict`/`--verbose`.
+
+Example:
+
+```json
+{
+  "table_patterns": [
+    { "table": "^public\\.(audit_log|temp_.*)$",
+      "mutation": { "mutation_name": "delete" } }
+  ],
+  "column_patterns": [
+    {
+      "table":  "^public\\.users$",
+      "column": "^email$",
+      "mutations": [{
+        "mutation_name": "email",
+        "mutation_kwargs": {"unique": true},
+        "conditions": [], "relations": []
+      }]
+    },
+    {
+      "table":  "^public\\..*$",
+      "column": "^(phone|mobile|.*_phone)$",
+      "mutations": [{
+        "mutation_name": "phone_number",
+        "mutation_kwargs": {"mask": "+7XXXXXXXXXX"},
+        "conditions": [], "relations": []
+      }]
+    }
+  ]
+}
+```
+
+```bash
+pg_dump -Fc mydb | pg_stage_rs --rules-file rules.json > out.dump
 ```
 
 ## Available Mutations

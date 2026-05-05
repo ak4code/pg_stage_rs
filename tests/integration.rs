@@ -556,3 +556,218 @@ fn test_plain_mutation_json_update_empty_object_skips_all() {
     );
     assert_eq!(meta, "{}", "got: {}", meta);
 }
+
+// ---------- --rules-file (RulesFile / load_rules) ----------
+
+fn run_with_rules(rules_json: &str, dump: &str) -> String {
+    let mut proc = make_processor();
+    proc.load_rules(rules_json).expect("rules should load");
+    let mut output = Vec::new();
+    let mut handler = PlainHandler::new(proc);
+    handler.process(Cursor::new(b""), &mut output, dump.as_bytes()).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
+#[test]
+fn test_rules_file_empty_object_loads() {
+    // Both fields default to empty — `{}` is a valid rules file.
+    let mut proc = make_processor();
+    proc.load_rules("{}").expect("empty rules file should load");
+    assert!(proc.registry.table_pattern_rules.is_empty());
+    assert!(proc.registry.column_pattern_rules.is_empty());
+}
+
+#[test]
+fn test_rules_file_table_pattern_deletes_matching_table() {
+    let rules = r#"{
+        "table_patterns": [
+            { "table": "^public\\.audit_.*$", "mutation": { "mutation_name": "delete" } }
+        ]
+    }"#;
+    let dump = concat!(
+        "COPY public.audit_log (id, message) FROM stdin;\n",
+        "1\tdeleted entry\n",
+        "\\.\n",
+        "COPY public.users (id, name) FROM stdin;\n",
+        "1\tKept Name\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    assert!(!result.contains("deleted entry"));
+    assert!(!result.contains("COPY public.audit_log"));
+    assert!(result.contains("Kept Name"));
+}
+
+#[test]
+fn test_rules_file_table_pattern_non_delete_does_not_drop_table() {
+    // Only "delete" is recognized at the table level; other names are no-ops.
+    let rules = r#"{
+        "table_patterns": [
+            { "table": "^public\\.users$", "mutation": { "mutation_name": "noop" } }
+        ]
+    }"#;
+    let dump = concat!(
+        "COPY public.users (id, name) FROM stdin;\n",
+        "1\tAlice\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    assert!(result.contains("Alice"));
+    assert!(result.contains("COPY public.users"));
+}
+
+#[test]
+fn test_rules_file_column_pattern_applies_mutation() {
+    let rules = r#"{
+        "column_patterns": [
+            {
+                "table":  "^public\\.users$",
+                "column": "^email$",
+                "mutations": [{
+                    "mutation_name": "fixed_value",
+                    "mutation_kwargs": {"value": "REDACTED"},
+                    "conditions": [], "relations": []
+                }]
+            }
+        ]
+    }"#;
+    let dump = concat!(
+        "COPY public.users (id, email) FROM stdin;\n",
+        "1\tjohn@example.com\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    assert!(result.contains("1\tREDACTED\n"));
+    assert!(!result.contains("john@example.com"));
+}
+
+#[test]
+fn test_rules_file_column_pattern_table_regex_must_match() {
+    // table regex `^public\.users$` should NOT match `public.orders`.
+    let rules = r#"{
+        "column_patterns": [
+            {
+                "table":  "^public\\.users$",
+                "column": "^email$",
+                "mutations": [{
+                    "mutation_name": "fixed_value",
+                    "mutation_kwargs": {"value": "REDACTED"},
+                    "conditions": [], "relations": []
+                }]
+            }
+        ]
+    }"#;
+    let dump = concat!(
+        "COPY public.orders (id, email) FROM stdin;\n",
+        "1\tcustomer@example.com\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    assert!(result.contains("customer@example.com"));
+    assert!(!result.contains("REDACTED"));
+}
+
+#[test]
+fn test_rules_file_column_pattern_supplements_comment_rules() {
+    // A column with both COMMENT-defined and rules-file-defined mutations:
+    // COMMENT runs first, then rules. Per `run_mutations`, the first spec
+    // whose conditions match wins for a column — so a non-conditional COMMENT
+    // rule should still apply, and the rules-file one merely co-exists.
+    let rules = r#"{
+        "column_patterns": [
+            {
+                "table":  "^public\\.users$",
+                "column": "^email$",
+                "mutations": [{
+                    "mutation_name": "fixed_value",
+                    "mutation_kwargs": {"value": "FROM_FILE"},
+                    "conditions": [], "relations": []
+                }]
+            }
+        ]
+    }"#;
+    let dump = concat!(
+        "COMMENT ON COLUMN public.users.email IS 'anon: [{\"mutation_name\": \"fixed_value\", \"mutation_kwargs\": {\"value\": \"FROM_COMMENT\"}}]';\n",
+        "COPY public.users (id, email) FROM stdin;\n",
+        "1\toriginal@example.com\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    // Original is gone, and one of the two replacements was used.
+    assert!(!result.contains("original@example.com"));
+    assert!(
+        result.contains("FROM_COMMENT") || result.contains("FROM_FILE"),
+        "expected one of the configured replacements, got: {}", result
+    );
+}
+
+#[test]
+fn test_rules_file_unanchored_regex_overmatches() {
+    // README warns: bare `users` (no ^...$) also matches `users_archive`.
+    // This test pins that behavior so future changes notice if it breaks.
+    let rules = r#"{
+        "column_patterns": [
+            {
+                "table":  "users",
+                "column": "email",
+                "mutations": [{
+                    "mutation_name": "fixed_value",
+                    "mutation_kwargs": {"value": "REDACTED"},
+                    "conditions": [], "relations": []
+                }]
+            }
+        ]
+    }"#;
+    let dump = concat!(
+        "COPY public.users_archive (id, email) FROM stdin;\n",
+        "1\told@example.com\n",
+        "\\.\n",
+    );
+    let result = run_with_rules(rules, dump);
+    assert!(result.contains("REDACTED"));
+    assert!(!result.contains("old@example.com"));
+}
+
+#[test]
+fn test_rules_file_invalid_json_errors() {
+    let mut proc = make_processor();
+    let err = proc.load_rules("{ not json").unwrap_err().to_string();
+    assert!(err.contains("invalid rules file"), "got: {}", err);
+}
+
+#[test]
+fn test_rules_file_bad_table_regex_errors() {
+    let rules = r#"{
+        "table_patterns": [
+            { "table": "[unterminated", "mutation": { "mutation_name": "delete" } }
+        ]
+    }"#;
+    let mut proc = make_processor();
+    let err = proc.load_rules(rules).unwrap_err().to_string();
+    assert!(err.contains("invalid table pattern"), "got: {}", err);
+}
+
+#[test]
+fn test_rules_file_bad_column_regex_errors() {
+    let rules = r#"{
+        "column_patterns": [
+            { "table": "^public\\.users$", "column": "[unterminated",
+              "mutations": [{ "mutation_name": "null", "mutation_kwargs": {}, "conditions": [], "relations": [] }] }
+        ]
+    }"#;
+    let mut proc = make_processor();
+    let err = proc.load_rules(rules).unwrap_err().to_string();
+    assert!(err.contains("invalid rule column pattern"), "got: {}", err);
+}
+
+#[test]
+fn test_rules_file_unknown_mutation_in_column_pattern_errors() {
+    let rules = r#"{
+        "column_patterns": [
+            { "table": "^public\\.users$", "column": "^email$",
+              "mutations": [{ "mutation_name": "no_such_mutation", "mutation_kwargs": {}, "conditions": [], "relations": [] }] }
+        ]
+    }"#;
+    let mut proc = make_processor();
+    assert!(proc.load_rules(rules).is_err());
+}

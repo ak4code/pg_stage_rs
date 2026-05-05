@@ -248,7 +248,12 @@ impl DataProcessor {
                 }
                 Err(e) => {
                     self.json_errors += 1;
-                    if self.strict || self.verbose {
+                    if self.strict {
+                        eprintln!(
+                            "pg_stage_rs error: invalid JSON in COMMENT ON TABLE {}: {}",
+                            table_name, e
+                        );
+                    } else if self.verbose {
                         eprintln!(
                             "pg_stage_rs warning: invalid JSON in COMMENT ON TABLE {}: {}",
                             table_name, e
@@ -410,8 +415,10 @@ impl DataProcessor {
             secrets,
             locale,
             mutations_applied,
+            verbose,
             ..
         } = self;
+        let verbose = *verbose;
 
         for &col_idx in sorted_col_indices.iter() {
             let col_name: &Arc<str> = &current_columns[col_idx];
@@ -492,10 +499,12 @@ impl DataProcessor {
                         break;
                     }
                     Err(e) => {
-                        eprintln!(
-                            "pg_stage_rs warning: mutation '{}' failed for column '{}': {}",
-                            spec.mutation_name, col_name, e
-                        );
+                        if verbose {
+                            eprintln!(
+                                "pg_stage_rs warning: mutation '{}' failed for column '{}': {}",
+                                spec.mutation_name, col_name, e
+                            );
+                        }
                         continue;
                     }
                 }

@@ -65,7 +65,9 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
 
-    if !matches!(args.locale.to_lowercase().as_str(), "en" | "ru" | "russian" | "english") {
+    if args.verbose
+        && !matches!(args.locale.to_lowercase().as_str(), "en" | "ru" | "russian" | "english")
+    {
         eprintln!(
             "pg_stage_rs warning: unknown locale '{}', falling back to 'en'",
             args.locale

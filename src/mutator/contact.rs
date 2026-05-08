@@ -28,9 +28,12 @@ pub fn email(ctx: &mut MutationContext) -> Result<String> {
 }
 
 pub fn phone_number(ctx: &mut MutationContext) -> Result<String> {
-    let mask: &str = ctx.get_str_kwarg("mask").ok_or_else(|| {
-        PgStageError::MissingParameter("mask".to_string(), "phone_number".to_string())
-    })?;
+    let mask: &str = ctx
+        .get_str_kwarg("mask")
+        .or_else(|| ctx.get_str_kwarg("format"))
+        .ok_or_else(|| {
+            PgStageError::MissingParameter("mask".to_string(), "phone_number".to_string())
+        })?;
     let unique = ctx.get_bool_kwarg("unique");
     let mask_bytes = mask.as_bytes();
     let mut gen = || {

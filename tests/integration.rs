@@ -152,6 +152,25 @@ fn test_plain_mutation_phone_number() {
 }
 
 #[test]
+fn test_plain_mutation_phone_number_format_alias() {
+    let input = concat!(
+        "COMMENT ON COLUMN public.users.phone IS 'anon: [{\"mutation_name\": \"phone_number\", \"mutation_kwargs\": {\"format\": \"+1 (###) ###-####\"}}]';\n",
+        "COPY public.users (id, phone) FROM stdin;\n",
+        "1\t+1 (555) 123-4567\n",
+        "\\.\n",
+    );
+    let mut output = Vec::new();
+    let mut handler = PlainHandler::new(make_processor());
+    handler.process(Cursor::new(b""), &mut output, input.as_bytes()).unwrap();
+    let result = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+    let data_line = lines.iter().find(|l| l.starts_with("1\t")).unwrap();
+    let parts: Vec<&str> = data_line.split('\t').collect();
+    assert!(parts[1].starts_with("+1 ("));
+    assert_eq!(parts[1].len(), "+1 (###) ###-####".len());
+}
+
+#[test]
 fn test_plain_mutation_uuid4() {
     let input = concat!(
         "COMMENT ON COLUMN public.users.uid IS 'anon: [{\"mutation_name\": \"uuid4\"}]';\n",

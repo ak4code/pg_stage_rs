@@ -13,7 +13,7 @@ use crate::format::custom::io::DumpIO;
 use crate::processor::DataProcessor;
 
 const OUTPUT_CHUNK_SIZE: usize = 1024 * 1024;
-const MAX_CHUNK_SIZE: usize = 50 * 1024 * 1024;
+const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024;
 const READ_BUF_SIZE: usize = 2 * 1024 * 1024;
 const COALESCE_TARGET: usize = 256 * 1024;
 
